@@ -1,7 +1,7 @@
 ---
 title: "JSON Schema serialization with Confluent Schema Registry"
 sidebarTitle: "JSON Schema"
-description: "Use KafkaJsonSchemaSerializer and KafkaJsonSchemaDeserializer to produce and consume type-safe events validated against schemas registered in Confluent Schema Registry."
+description: "Produce and consume type-safe JSON events validated by Confluent Schema Registry using KafkaJsonSchemaSerializer and KafkaJsonSchemaDeserializer."
 ---
 
 Confluent's `kafka-json-schema-serializer` brings the governance of Schema Registry to plain JSON Kafka messages. Rather than compiling a schema file ahead of time, you write a standard Java POJO and let the serializer derive a JSON Schema from it via Jackson reflection. The derived schema is registered in Schema Registry on the first `produce` call, and a compact schema ID is embedded in every message header. Consumers retrieve the schema by ID, validate the payload, and deserialize it back to the original POJO — giving you the round-trip type safety of Avro with the readability of JSON.

@@ -53,7 +53,7 @@ mvn generate-sources
 ```
 
 After generation, the class is available at:
-```
+```text
 target/generated-sources/avro/com/example/kafka/events/PaymentAvro.java
 ```
 
@@ -151,7 +151,7 @@ PaymentAvro payment = PaymentAvro.newBuilder()
   <Step title="Encode to binary">
     The message is serialized to Avro binary format — a compact, schema-less byte sequence (fields are positional, not named). The wire format is:
 
-    ```
+    ```text
     [ 0x00 | schema_id (4 bytes) | avro_binary_payload ]
     ```
   </Step>
@@ -202,7 +202,7 @@ SCHEMA_REGISTRY_API_SECRET=your_schema_registry_api_secret
     ```
   </Step>
   <Step title="Verify the output">
-    ```
+    ```text
     Starting Avro Producer...
     Kafka Avro Producer created.
     Payment object created.

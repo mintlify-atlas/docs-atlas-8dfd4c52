@@ -1,7 +1,7 @@
 ---
-title: "Environment variable configuration reference"
+title: "Kafka Learning: env var and class configuration reference"
 sidebarTitle: "Configuration"
-description: "Complete reference for all environment variables used by Kafka Learning: Kafka broker credentials, Schema Registry credentials, and which classes require each variable."
+description: "All six Kafka Learning env vars: broker credentials, Schema Registry credentials, and a class table showing what each runnable class requires."
 ---
 
 Kafka Learning uses `dotenv-java` to load configuration at runtime from a `.env` file (or from real environment variables when running inside a container). There are two logical groups of variables: Kafka broker credentials consumed by `KafkaConnection`, and Schema Registry credentials consumed by `RegistryConnection`. Understanding which classes require each group helps you build minimal `.env` files for testing and avoids runtime errors caused by missing values.

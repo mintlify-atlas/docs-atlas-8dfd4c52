@@ -1,7 +1,7 @@
 ---
 title: "Infer Avro schemas dynamically from JSON API responses"
 sidebarTitle: "Dynamic Inference"
-description: "AvroSchemaService infers an Avro Schema at runtime by inspecting sample JsonNode objects, handling optional fields, nested records, arrays, and all primitive types."
+description: "AvroSchemaService infers Avro schemas at runtime from JsonNode samples, detecting optional fields and handling nested records, arrays, and primitive types."
 ---
 
 Most Avro workflows start with a hand-authored `.avsc` file. The dynamic inference pipeline in this project takes the opposite approach: it fetches live product data from a public REST API, examines the shape of the JSON at runtime, and constructs an `org.apache.avro.Schema` object without a single hard-coded field name. This lets `DynamicProductProducer` publish any JSON structure as a valid Avro message — and automatically treat fields that are missing from some records as nullable unions rather than schema violations.

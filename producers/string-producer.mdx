@@ -1,7 +1,7 @@
 ---
-title: "Produce plain string messages to Kafka topics"
+title: "Produce plain string messages to Apache Kafka topics"
 sidebarTitle: "String Producer"
-description: "Send raw string and JSON messages to Kafka using StringSerializer. Covers both Confluent Cloud and local broker variants with synchronous send acknowledgement."
+description: "Send raw string and JSON messages to Kafka using StringSerializer. Covers Confluent Cloud and local broker variants with synchronous send."
 ---
 
 Sending plain string messages is the simplest way to start producing to Kafka. This project includes two complementary implementations: `Producer` targets a Confluent Cloud cluster over SASL_SSL and sends a raw JSON payload to the `orders` topic, while `LocalProducer` connects to a broker running on `localhost:9092` with no authentication and sends a plain string to the `payments` topic. Both classes use `StringSerializer` for keys and values, construct a `ProducerRecord`, and block on `.get()` to confirm Kafka has acknowledged the write before the JVM exits.
@@ -231,7 +231,7 @@ producer.send(record).get();
     ```
 
     Expected output:
-    ```
+    ```text
     Payment event successfully sent!
     ```
   </Tab>
@@ -243,7 +243,7 @@ producer.send(record).get();
     ```
 
     Expected output:
-    ```
+    ```text
     Kafka Producer created.
     Record sent successfully!
     ```

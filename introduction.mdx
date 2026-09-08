@@ -1,5 +1,5 @@
 ---
-title: "Kafka Learning: Java patterns for Apache Kafka"
+title: "Kafka Learning: Java Maven patterns for Apache Kafka"
 sidebarTitle: "Introduction"
 description: "Overview of the Kafka Learning project — a Java reference covering producers, consumers, Avro, JSON Schema, Schema Registry, and topic management."
 ---
@@ -166,22 +166,22 @@ Before running any class you need:
 ## Sections in this documentation
 
 <CardGroup cols={2}>
-  <Card title="Connections" icon="plug" href="/connections">
+  <Card title="Connections" icon="plug" href="/connections/confluent-cloud">
     How `KafkaConnection`, `KafkaLocalConnection`, and `RegistryConnection` load credentials and build `Properties` objects for each client type.
   </Card>
-  <Card title="Producers" icon="paper-plane" href="/producers">
+  <Card title="Producers" icon="paper-plane" href="/producers/string-producer">
     Five producer patterns: plain string, local, JSON Schema, Avro with generated classes, and Avro with dynamically inferred schemas.
   </Card>
-  <Card title="Consumers" icon="inbox" href="/consumers">
+  <Card title="Consumers" icon="inbox" href="/consumers/string-consumer">
     Plain-string and JSON Schema consumer implementations with group management, offset reset strategy, and continuous poll loops.
   </Card>
-  <Card title="Admin" icon="sliders" href="/admin">
+  <Card title="Admin" icon="sliders" href="/admin/connection-test">
     Programmatic topic creation and deletion using the `Admin` client, plus a connection-test utility.
   </Card>
   <Card title="Schema & Serialization" icon="code" href="/schema/avro-schema">
     Avro IDL with code generation, JSON Schema serialization, schema inference from live JSON data, and the `PaymentEvent` POJO model.
   </Card>
-  <Card title="Deployment" icon="docker" href="/deployment">
+  <Card title="Deployment" icon="docker" href="/deployment/docker">
     Multi-stage Dockerfile that produces a minimal Alpine JRE image running the `DynamicProductProducer` fat JAR.
   </Card>
 </CardGroup>

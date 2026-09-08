@@ -1,7 +1,7 @@
 ---
-title: "Consume JSON Schema–validated events from Kafka"
+title: "Consume JSON Schema-validated events from Kafka topics"
 sidebarTitle: "Schema Consumer"
-description: "SchemaConsumer uses KafkaJsonSchemaDeserializer and Confluent Schema Registry to deserialize messages from the orders topic back into typed PaymentEvent objects."
+description: "SchemaConsumer uses KafkaJsonSchemaDeserializer with Confluent Schema Registry to deserialize orders topic messages into typed PaymentEvent objects."
 ---
 
 The `SchemaConsumer` class takes consumer deserialization a step further than the raw string approach: instead of treating message values as opaque strings, it uses Confluent's `KafkaJsonSchemaDeserializer` to validate each record's payload against the registered JSON Schema and reconstruct a fully typed `PaymentEvent` Java object. The schema itself is never embedded in the consumer — it is fetched automatically from Confluent Schema Registry at startup using the same environment-driven credentials that the producer used when registering it. This guarantees that producer and consumer always agree on the event shape without any out-of-band coordination.
@@ -31,14 +31,14 @@ public class SchemaConsumer {
         props.put("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
         props.put("value.deserializer", KafkaJsonSchemaDeserializer.class.getName());
 
-        Properties registryProps = RegistryConnection.getProperties();
+        Properties registryProps= RegistryConnection.getProperties();
 
         props.putAll(registryProps);
 
         try (KafkaConsumer<String, PaymentEvent> consumer = new KafkaConsumer<>(props)) {
             consumer.subscribe(Collections.singletonList("orders"));
 
-            while (true) {
+            while(true){
                 var records = consumer.poll(java.time.Duration.ofMillis(100));
                 for (var record : records) {
                     System.out.printf("Consumed record with key %s ", record.key());
@@ -46,7 +46,9 @@ public class SchemaConsumer {
                 }
             }
         }
+
     }
+
 }
 ```
 

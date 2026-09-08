@@ -1,5 +1,5 @@
 ---
-title: "Connect to Confluent Cloud with SASL_SSL auth"
+title: "Connect to Confluent Cloud using SASL_SSL and PLAIN"
 sidebarTitle: "Confluent Cloud"
 description: "Configure the KafkaConnection helper to authenticate against Confluent Cloud using SASL_SSL/PLAIN credentials loaded from a .env file."
 ---
@@ -15,6 +15,9 @@ package com.example.kafka.connections;
 import java.util.Properties;
 
 import io.github.cdimascio.dotenv.Dotenv;
+
+
+
 
 public class KafkaConnection {
      public static Properties getProperties() {

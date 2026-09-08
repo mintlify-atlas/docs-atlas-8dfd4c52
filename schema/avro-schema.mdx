@@ -15,11 +15,24 @@ The schema for this project lives at `src/main/avro/PaymentAvro.avsc`. It define
   "type": "record",
   "name": "PaymentAvro",
   "namespace": "com.example.kafka.events",
+
   "fields": [
-    { "name": "customerId", "type": "string" },
-    { "name": "amount",     "type": "long"   },
-    { "name": "currency",   "type": "string" },
-    { "name": "eventType",  "type": "string" }
+    {
+      "name": "customerId",
+      "type": "string"
+    },
+    {
+      "name": "amount",
+      "type": "long"
+    },
+    {
+      "name": "currency",
+      "type": "string"
+    },
+    {
+      "name": "eventType",
+      "type": "string"
+    }
   ]
 }
 ```

@@ -1,5 +1,5 @@
 ---
-title: "Connect to a local Kafka broker for development"
+title: "Connect to a local Kafka broker for development work"
 sidebarTitle: "Local Kafka"
 description: "Use KafkaLocalConnection to connect to a local Kafka broker at localhost:9092 with no authentication — ideal for local development and testing."
 ---
@@ -107,10 +107,13 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 
 import com.example.kafka.connections.KafkaLocalConnection;
 
+
+
 public class LocalProducer {
 
     public static void main(String args[]){
 
+        
         Properties props = KafkaLocalConnection.getProperties();
         String topicName = "payments";
         String key = "key1";

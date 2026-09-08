@@ -1,7 +1,7 @@
 ---
-title: "Get started with Kafka Learning in Java"
+title: "Get started with Kafka Learning: Java and Maven setup"
 sidebarTitle: "Quickstart"
-description: "Clone the repo, configure your .env credentials, build with Maven, and send your first Kafka message in under five minutes."
+description: "Clone the repo, configure your .env broker credentials, build with Maven, and send your first Kafka message to the orders topic in under five minutes."
 ---
 
 This guide walks you through cloning the repository, satisfying the prerequisites, wiring up your broker credentials, building the project, and running the plain-string producer and consumer pair against the `orders` topic. By the end you will have a working end-to-end Kafka message flow and a clear mental model of how the project's connection and serialization layers fit together.
@@ -151,18 +151,23 @@ Internally, `Producer.main()` constructs this record and awaits broker acknowled
 
 ```java
 String paymentEvent = """
-        {
-            "customer_id": "C1001",
-            "amount": 5000,
-            "currency": "INR",
-            "event_type": "PAYMENT"
-        }
-        """;
+                    {
+                        "customer_id": "C1001",
+                        "amount": 5000,
+                        "currency": "INR",
+                        "event_type": "PAYMENT"
+                    }
+                    """;
 
 ProducerRecord<String, String> record =
-        new ProducerRecord<>("orders", "C1001", paymentEvent);
+        new ProducerRecord<>(
+                "orders",
+                "C1001",
+                paymentEvent
+        );
 
-producer.send(record).get();   // blocks until acknowledged
+// Wait for Kafka to acknowledge the event
+producer.send(record).get();
 
 System.out.println("Payment event successfully sent!");
 ```
@@ -266,16 +271,16 @@ The consumer runs until you press **Ctrl + C**. It will continue printing each n
 ## What to explore next
 
 <CardGroup cols={2}>
-  <Card title="Connections" icon="plug" href="/connections">
+  <Card title="Connections" icon="plug" href="/connections/confluent-cloud">
     Deep-dive into all three connection factories and how they compose `Properties` for different client types.
   </Card>
-  <Card title="Producers" icon="paper-plane" href="/producers">
+  <Card title="Producers" icon="paper-plane" href="/producers/string-producer">
     Explore the JSON Schema, Avro, and dynamic schema producer variants beyond the plain-string `Producer`.
   </Card>
-  <Card title="Consumers" icon="inbox" href="/consumers">
+  <Card title="Consumers" icon="inbox" href="/consumers/string-consumer">
     See how `SchemaConsumer` deserializes `PaymentEvent` objects using `KafkaJsonSchemaDeserializer`.
   </Card>
-  <Card title="Admin" icon="sliders" href="/admin">
+  <Card title="Admin" icon="sliders" href="/admin/connection-test">
     Create and delete topics programmatically, and verify connectivity before running producers.
   </Card>
 </CardGroup>

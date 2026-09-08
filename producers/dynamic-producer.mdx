@@ -1,7 +1,7 @@
 ---
 title: "Produce dynamic Avro records with runtime schema inference"
 sidebarTitle: "Dynamic Producer"
-description: "DynamicProductProducer fetches live product data from an API, infers an Avro schema from samples, and produces all records to the products topic using KafkaAvroSerializer."
+description: "Fetch live product JSON from dummyjson.com, infer an Avro schema at runtime, and produce all records to the products topic using KafkaAvroSerializer."
 ---
 
 `DynamicProductProducer` is the most sophisticated producer in this project and the entry point of the Docker image's fat JAR. Rather than working from a hand-written `.avsc` file, it fetches live product data from the public `dummyjson.com` API at runtime, analyzes a sample of the JSON to infer an Avro schema on the fly, and then produces every product record to the `products` Kafka topic using `KafkaAvroSerializer`. This pattern is useful when the shape of external data is not known ahead of time or can change between deployments — the schema is always derived from the actual data being produced.
@@ -302,7 +302,7 @@ mvn exec:java -Dexec.mainClass=com.example.kafka.producer.DynamicProductProducer
 ```
 
 Expected console output:
-```
+```text
 1. Fetching products from API...
 2. Building sample set for schema inference...
 3. Inferring schema from 30 sample records...
