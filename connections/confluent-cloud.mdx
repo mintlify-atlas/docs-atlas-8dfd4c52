@@ -1,0 +1,196 @@
+---
+title: "Connect to Confluent Cloud with SASL_SSL auth"
+sidebarTitle: "Confluent Cloud"
+description: "Configure the KafkaConnection helper to authenticate against Confluent Cloud using SASL_SSL/PLAIN credentials loaded from a .env file."
+---
+
+The `KafkaConnection` class is the central authentication helper for all Confluent Cloud workloads in this project. It reads your cluster credentials from a local `.env` file at startup using dotenv-java, then assembles a `java.util.Properties` object pre-configured with the three properties Confluent Cloud requires: a TLS-encrypted bootstrap address, the `SASL_SSL` security protocol, and a `PLAIN` JAAS login module carrying your API key and secret. Every cloud-facing producer and consumer in this project calls `KafkaConnection.getProperties()` as its first step and adds its own serializer or deserializer keys on top.
+
+## How `KafkaConnection` works
+
+The static `getProperties()` method loads the three required environment variables, constructs the JAAS config string by interpolating the API key and secret, and returns a fully populated `Properties` object ready to be passed directly to `KafkaProducer` or `KafkaConsumer`.
+
+```java
+package com.example.kafka.connections;
+import java.util.Properties;
+
+import io.github.cdimascio.dotenv.Dotenv;
+
+public class KafkaConnection {
+     public static Properties getProperties() {
+        Dotenv dotenv = Dotenv.load();
+
+        String bootstrapServers = dotenv.get("KAFKA_BOOTSTRAP_SERVERS");
+        String apiKey = dotenv.get("KAFKA_API_KEY");
+        String apiSecret = dotenv.get("KAFKA_API_SECRET");
+
+        Properties props = new Properties();
+
+        props.put(
+                "bootstrap.servers",
+                bootstrapServers
+        );
+
+        props.put(
+                "security.protocol",
+                "SASL_SSL"
+        );
+
+        props.put(
+                "sasl.mechanism",
+                "PLAIN"
+        );
+
+        props.put(
+                "sasl.jaas.config",
+                "org.apache.kafka.common.security.plain.PlainLoginModule required " +
+                "username=\"" + apiKey + "\" " +
+                "password=\"" + apiSecret + "\";"
+        );
+
+        return props;
+    }
+}
+```
+
+### Properties set by `getProperties()`
+
+| Property | Value | Purpose |
+|---|---|---|
+| `bootstrap.servers` | From `KAFKA_BOOTSTRAP_SERVERS` | Cluster endpoint(s) |
+| `security.protocol` | `SASL_SSL` | Encrypts the connection with TLS |
+| `sasl.mechanism` | `PLAIN` | Username/password credential exchange |
+| `sasl.jaas.config` | Built from `KAFKA_API_KEY` + `KAFKA_API_SECRET` | Authenticates via `PlainLoginModule` |
+
+## Environment variables
+
+Each variable is read once at runtime by `Dotenv.load()`, which looks for a file named `.env` in the project root directory.
+
+<ParamField path="KAFKA_BOOTSTRAP_SERVERS" type="string" required>
+  The bootstrap server endpoint for your Confluent Cloud cluster. It takes the form `<unique-id>.<region>.aws.confluent.cloud:9092` (the port is always `9092` for Confluent Cloud SASL endpoints). Copy the exact value from the cluster's client configuration page — do not add a protocol prefix such as `https://`.
+</ParamField>
+
+<ParamField path="KAFKA_API_KEY" type="string" required>
+  The API key generated for your Confluent Cloud cluster. This becomes the `username` inside the JAAS config string. API keys are scoped to a single cluster and can be rotated independently without changing your application code.
+</ParamField>
+
+<ParamField path="KAFKA_API_SECRET" type="string" required>
+  The API secret that pairs with `KAFKA_API_KEY`. This becomes the `password` inside the JAAS config string. Confluent Cloud shows the secret only once at creation time — store it securely before closing the dialog.
+</ParamField>
+
+## Getting credentials from the Confluent Cloud console
+
+<Steps>
+  <Step title="Open your cluster">
+    Log in to [Confluent Cloud](https://confluent.cloud) and select the cluster you want to connect to from the **Environments** view.
+  </Step>
+  <Step title="Navigate to Clients">
+    In the left-hand sidebar choose **Clients**, then click **Add new client** and select **Java** from the language list.
+  </Step>
+  <Step title="Create an API key">
+    If you don't already have an API key for this cluster, choose **Create Kafka cluster API key**. Give it a description so you can identify it later. The console displays the key and secret — copy both immediately.
+  </Step>
+  <Step title="Copy the bootstrap server">
+    The generated configuration snippet contains a `bootstrap.servers` entry. Copy the host-and-port string (e.g. `abc123.us-east-1.aws.confluent.cloud:9092`).
+  </Step>
+  <Step title="Populate your .env file">
+    Create a `.env` file in the root of the project (the same directory as `pom.xml`) and paste in your values:
+    ```properties
+    KAFKA_BOOTSTRAP_SERVERS=abc123.us-east-1.aws.confluent.cloud:9092
+    KAFKA_API_KEY=YOUR_API_KEY_HERE
+    KAFKA_API_SECRET=YOUR_API_SECRET_HERE
+    ```
+  </Step>
+</Steps>
+
+## `.env` file reference
+
+```properties
+# Confluent Cloud cluster credentials
+KAFKA_BOOTSTRAP_SERVERS=abc123.us-east-1.aws.confluent.cloud:9092
+KAFKA_API_KEY=ABCDEFGHIJ123456
+KAFKA_API_SECRET=abc123xyz789longsecretstringgoeshere
+
+# Schema Registry credentials (used by RegistryConnection — see Schema Registry page)
+SCHEMA_REGISTRY_URL=https://psrc-xxxxx.us-east-2.aws.confluent.cloud
+SCHEMA_REGISTRY_API_KEY=SR_API_KEY_HERE
+SCHEMA_REGISTRY_API_SECRET=SR_API_SECRET_HERE
+```
+
+<Warning>
+  **Never commit `.env` to version control.** Your API key and secret grant full access to your Confluent Cloud cluster and Schema Registry. Add `.env` to your `.gitignore` immediately. If a secret is accidentally pushed, rotate it in the Confluent Cloud console under **API Keys** before anything else.
+</Warning>
+
+## Using `KafkaConnection` in producers and consumers
+
+Producers and consumers retrieve the base connection properties with a single call, then layer their own serializer configuration on top:
+
+<Tabs>
+  <Tab title="Producer">
+    ```java
+    Properties props = KafkaConnection.getProperties();
+
+    props.put("key.serializer",
+        "org.apache.kafka.common.serialization.StringSerializer");
+    props.put("value.serializer",
+        "org.apache.kafka.common.serialization.StringSerializer");
+
+    try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+        ProducerRecord<String, String> record =
+            new ProducerRecord<>("payments", "key1", "value1");
+        producer.send(record).get();
+    }
+    ```
+  </Tab>
+  <Tab title="Consumer">
+    ```java
+    Properties props = KafkaConnection.getProperties();
+
+    props.put("group.id", "my-consumer-group");
+    props.put("key.deserializer",
+        "org.apache.kafka.common.serialization.StringDeserializer");
+    props.put("value.deserializer",
+        "org.apache.kafka.common.serialization.StringDeserializer");
+
+    try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+        consumer.subscribe(Collections.singletonList("payments"));
+        // poll loop ...
+    }
+    ```
+  </Tab>
+  <Tab title="Avro Producer (with Schema Registry)">
+    ```java
+    Properties props = KafkaConnection.getProperties();
+
+    props.put("key.serializer",
+        "org.apache.kafka.common.serialization.StringSerializer");
+    props.put("value.serializer",
+        "io.confluent.kafka.serializers.KafkaAvroSerializer");
+
+    // Merge Schema Registry authentication on top
+    props.putAll(RegistryConnection.getProperties());
+
+    try (KafkaProducer<String, PaymentAvro> producer = new KafkaProducer<>(props)) {
+        // produce Avro records ...
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  When Schema Registry serialization is needed (Avro or JSON Schema), call `props.putAll(RegistryConnection.getProperties())` after `KafkaConnection.getProperties()`. See the [Schema Registry connection page](/connections/schema-registry) for details.
+</Tip>
+
+## Troubleshooting
+
+<Accordion title="org.apache.kafka.common.KafkaException: Failed to load SSL keystore">
+  This typically means `security.protocol` is correct but the JVM cannot establish a TLS handshake. Ensure you are using Java 17+ and that your network allows outbound connections on port `9092`.
+</Accordion>
+
+<Accordion title="io.github.cdimascio.dotenv.DotenvException: Could not find .env file">
+  dotenv-java looks for `.env` in the current working directory, which is the project root when running via Maven (`mvn exec:java`). Make sure the file exists at the same level as `pom.xml` and is named exactly `.env` (not `env` or `.env.txt`).
+</Accordion>
+
+<Accordion title="SASL authentication failed: Invalid credentials">
+  Double-check that `KAFKA_API_KEY` and `KAFKA_API_SECRET` match the values shown in the Confluent Cloud console. Keys are case-sensitive. If in doubt, delete the key and generate a new one — secrets cannot be retrieved after initial creation.
+</Accordion>

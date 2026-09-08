@@ -1,0 +1,197 @@
+---
+title: "Configure Confluent Schema Registry authentication"
+sidebarTitle: "Schema Registry"
+description: "Set up RegistryConnection to authenticate against Confluent Schema Registry using USER_INFO basic auth loaded from environment variables."
+---
+
+`RegistryConnection` handles authentication against Confluent Schema Registry independently of the Kafka cluster credentials managed by `KafkaConnection`. Schema Registry uses HTTP basic authentication rather than SASL/JAAS, so it needs its own set of properties: a URL, an API key, and an API secret formatted as a colon-delimited `user:password` string under the `basic.auth.user.info` key. By keeping Registry credentials in a dedicated helper class, every serializing producer and deserializing consumer can merge them into its properties with a single `putAll` call without duplicating credential logic.
+
+## How `RegistryConnection` works
+
+`getProperties()` loads three environment variables from `.env`, constructs a `Properties` object with the Schema Registry URL and the USER_INFO basic-auth credential string, and returns it. The returned properties are never used alone — they are always merged into a larger `Properties` object that already contains the Kafka cluster configuration.
+
+```java
+package com.example.kafka.connections;
+
+import java.util.Properties;
+
+import io.github.cdimascio.dotenv.Dotenv;
+
+public class RegistryConnection {
+
+    public static Properties getProperties() {
+
+        Dotenv dotenv = Dotenv.load();
+        String schemaRegistryUrl = dotenv.get("SCHEMA_REGISTRY_URL");
+        String schemaRegistryApiKey = dotenv.get("SCHEMA_REGISTRY_API_KEY");
+        String schemaRegistryApiSecret = dotenv.get("SCHEMA_REGISTRY_API_SECRET");
+
+        Properties props = new Properties();
+
+        props.put(
+                "schema.registry.url",
+                schemaRegistryUrl
+        );
+
+        props.put(
+                "basic.auth.credentials.source",
+                "USER_INFO"
+        );
+
+        props.put(
+                "basic.auth.user.info",
+                schemaRegistryApiKey + ":" + schemaRegistryApiSecret
+        );
+
+        return props;
+    }
+}
+```
+
+### Properties set by `getProperties()`
+
+| Property | Value | Purpose |
+|---|---|---|
+| `schema.registry.url` | From `SCHEMA_REGISTRY_URL` | HTTPS endpoint of your Schema Registry instance |
+| `basic.auth.credentials.source` | `USER_INFO` | Tells the Confluent serializers to read credentials from `basic.auth.user.info` |
+| `basic.auth.user.info` | `API_KEY:API_SECRET` | Colon-delimited credential string sent as HTTP Basic auth header |
+
+## Environment variables
+
+<ParamField path="SCHEMA_REGISTRY_URL" type="string" required>
+  The full HTTPS URL of your Confluent Schema Registry endpoint, for example `https://psrc-xxxxx.us-east-2.aws.confluent.cloud`. Do not include a trailing slash. This value is available in the Confluent Cloud console under **Schema Registry → Cluster Settings → Endpoint**.
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_API_KEY" type="string" required>
+  The API key for Schema Registry access. This is a **separate** key from the Kafka cluster API key — Schema Registry keys are created under **Schema Registry → API Credentials** in the Confluent Cloud console. It becomes the `username` segment of the `basic.auth.user.info` credential string.
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_API_SECRET" type="string" required>
+  The API secret paired with `SCHEMA_REGISTRY_API_KEY`. It becomes the `password` segment of the `basic.auth.user.info` credential string in the format `API_KEY:API_SECRET`. Like all Confluent Cloud secrets, it is shown only once at creation time.
+</ParamField>
+
+## Understanding `basic.auth.credentials.source=USER_INFO`
+
+The Confluent serializers support several ways of supplying Schema Registry credentials. Setting `basic.auth.credentials.source` to `USER_INFO` instructs them to read from the `basic.auth.user.info` property directly. The value of that property must be a single string in `username:password` format — exactly what `RegistryConnection.getProperties()` builds by concatenating `schemaRegistryApiKey + ":" + schemaRegistryApiSecret`.
+
+When the serializer (e.g. `KafkaAvroSerializer` or `KafkaJsonSchemaSerializer`) makes an HTTP request to register or look up a schema, it Base64-encodes the `user:password` string and sends it as the `Authorization: Basic <token>` HTTP header. The `USER_INFO` source is the standard choice for Confluent Cloud; other sources like `URL` (embedding credentials in the URL) are not recommended because they expose secrets in logs.
+
+<Info>
+  Schema Registry API keys are scoped to the Schema Registry instance, not to individual Kafka topics or subjects. A single Schema Registry key/secret pair can read and write all schemas in the registry unless you configure fine-grained ACLs.
+</Info>
+
+## Merging Registry properties into producer/consumer configuration
+
+Schema Registry properties must be merged into the same `Properties` object as the Kafka cluster properties before passing it to `KafkaProducer` or `KafkaConsumer`. The pattern used throughout this project is:
+
+```java
+Properties props = KafkaConnection.getProperties();   // Kafka cluster auth
+props.putAll(RegistryConnection.getProperties());     // Schema Registry auth
+
+// Then add serializer/deserializer keys
+props.put("key.serializer",   "org.apache.kafka.common.serialization.StringSerializer");
+props.put("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
+```
+
+`Properties.putAll()` copies all entries from the registry properties map into the existing `props` map. Because the key sets are disjoint (`bootstrap.servers`, `security.protocol`, `sasl.*` vs. `schema.registry.url`, `basic.auth.*`), there are no collisions.
+
+## Producers and consumers that require Schema Registry
+
+<CardGroup cols={2}>
+  <Card title="AvroProducer" icon="arrow-up-from-bracket">
+    Sends `PaymentAvro` records to the `payments-avro` topic using `KafkaAvroSerializer`. Schemas are registered automatically in Confluent Schema Registry on the first produce call.
+
+    ```java
+    Properties props = KafkaConnection.getProperties();
+    props.put("value.serializer",
+        "io.confluent.kafka.serializers.KafkaAvroSerializer");
+    Properties schemaProps = RegistryConnection.getProperties();
+    props.putAll(schemaProps);
+    ```
+  </Card>
+  <Card title="SchemaProducer" icon="arrow-up-from-bracket">
+    Sends `PaymentEvent` records to the `orders` topic using `KafkaJsonSchemaSerializer`. JSON Schema is inferred from the POJO and registered in Schema Registry.
+
+    ```java
+    Properties props = KafkaConnection.getProperties();
+    props.put("value.serializer",
+        KafkaJsonSchemaSerializer.class.getName());
+    Properties schemaProps = RegistryConnection.getProperties();
+    props.putAll(schemaProps);
+    ```
+  </Card>
+  <Card title="SchemaConsumer" icon="arrow-down-to-bracket">
+    Reads `PaymentEvent` records from the `orders` topic using `KafkaJsonSchemaDeserializer`. Fetches the registered JSON Schema from Schema Registry to validate and deserialize each record.
+
+    ```java
+    Properties props = KafkaConnection.getProperties();
+    props.put("value.deserializer",
+        KafkaJsonSchemaDeserializer.class.getName());
+    Properties registryProps = RegistryConnection.getProperties();
+    props.putAll(registryProps);
+    ```
+  </Card>
+  <Card title="DynamicProductProducer" icon="bolt">
+    Infers an Avro schema dynamically from a sampled JSON API response, registers it, then produces all records to the `products` topic using `KafkaAvroSerializer`.
+
+    ```java
+    Properties props = KafkaConnection.getProperties();
+    props.putAll(RegistryConnection.getProperties());
+    props.put("value.serializer",
+        "io.confluent.kafka.serializers.KafkaAvroSerializer");
+    ```
+  </Card>
+</CardGroup>
+
+## Complete `.env` reference
+
+```properties
+# Confluent Cloud Kafka cluster
+KAFKA_BOOTSTRAP_SERVERS=abc123.us-east-1.aws.confluent.cloud:9092
+KAFKA_API_KEY=KAFKA_KEY_HERE
+KAFKA_API_SECRET=KAFKA_SECRET_HERE
+
+# Confluent Schema Registry (separate credentials from the cluster)
+SCHEMA_REGISTRY_URL=https://psrc-xxxxx.us-east-2.aws.confluent.cloud
+SCHEMA_REGISTRY_API_KEY=SR_KEY_HERE
+SCHEMA_REGISTRY_API_SECRET=SR_SECRET_HERE
+```
+
+<Warning>
+  Schema Registry API keys and Kafka cluster API keys are **different** key pairs created in different sections of the Confluent Cloud console. Using a Kafka cluster key as a Schema Registry key will result in authentication errors from the Schema Registry HTTP endpoint.
+</Warning>
+
+## Getting Schema Registry credentials from Confluent Cloud
+
+<Steps>
+  <Step title="Open Schema Registry settings">
+    In the Confluent Cloud console, select your **Environment** (not the cluster). In the right-hand panel you will see a **Schema Registry** section showing the **API endpoint** — copy this as `SCHEMA_REGISTRY_URL`.
+  </Step>
+  <Step title="Create a Schema Registry API key">
+    Click **Add key** under **Schema Registry API credentials**. Choose between a global access key (all subjects) or a granular key (specific subjects), then click **Create API key**.
+  </Step>
+  <Step title="Copy key and secret">
+    The console displays the API key and secret once. Copy both values and store them securely before closing the dialog. Paste them as `SCHEMA_REGISTRY_API_KEY` and `SCHEMA_REGISTRY_API_SECRET` in your `.env` file.
+  </Step>
+  <Step title="Verify connectivity">
+    Run any schema-aware producer (e.g. `SchemaProducer`) with `mvn exec:java`. A successful run prints `"Payment event successfully sent!"`. A `401 Unauthorized` HTTP error from the serializer indicates incorrect Registry credentials.
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<Accordion title="io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: 401 Unauthorized">
+  The `basic.auth.user.info` value is incorrect. Verify that `SCHEMA_REGISTRY_API_KEY` and `SCHEMA_REGISTRY_API_SECRET` are both set, that there is no extra whitespace in the `.env` file, and that the colon separator is present between key and secret in the constructed `user.info` string.
+</Accordion>
+
+<Accordion title="io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: 404 Subject Not Found">
+  The schema for the topic's value subject has not been registered yet. Avro and JSON Schema serializers register schemas automatically on the first produce call when the producer has write access. Ensure your Schema Registry API key has sufficient permissions.
+</Accordion>
+
+<Accordion title="java.net.ConnectException: Connection refused to Schema Registry URL">
+  The `SCHEMA_REGISTRY_URL` is either incorrect or the network path to Confluent Cloud is blocked. Confirm the URL starts with `https://` and matches the endpoint shown in **Environment → Schema Registry**. Also check that your firewall allows outbound HTTPS (port 443) to Confluent Cloud.
+</Accordion>
+
+<Accordion title="DotenvException: Could not find .env file">
+  `RegistryConnection` calls `Dotenv.load()` independently of `KafkaConnection`. If the `.env` file is missing or not in the project root, both helpers fail. Ensure the `.env` file exists at the same level as `pom.xml`.
+</Accordion>

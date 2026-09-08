@@ -1,0 +1,200 @@
+---
+title: "Produce JSON Schema–validated events with Schema Registry"
+sidebarTitle: "Schema Producer"
+description: "Use KafkaJsonSchemaSerializer to produce type-safe PaymentEvent objects to Kafka with automatic schema registration in Confluent Schema Registry."
+---
+
+`SchemaProducer` elevates plain-string messaging by attaching a formal JSON Schema to every message. Instead of producing a raw JSON string, it serializes a typed Java object — `PaymentEvent` — using Confluent's `KafkaJsonSchemaSerializer`. On the first produce call, the serializer derives the JSON Schema from the POJO class, registers it in Confluent Schema Registry, and embeds the schema ID in each message's binary prefix. Downstream consumers can then validate incoming data against the registered schema before deserializing, providing an enforceable contract between producers and consumers.
+
+## The PaymentEvent POJO
+
+`PaymentEvent` is a plain Java object with four fields representing a payment transaction. It has a single all-args constructor, standard getters, and a `toString()` override — no framework annotations or special base class required.
+
+```java
+package com.example.kafka.events;
+
+public class PaymentEvent {
+
+    private String customerId;
+    private long amount;
+    private String currency;
+    private String eventType;
+
+    public PaymentEvent(String customerId,
+                        long amount,
+                        String currency,
+                        String eventType) {
+        this.customerId = customerId;
+        this.amount = amount;
+        this.currency = currency;
+        this.eventType = eventType;
+    }
+
+    public String getCustomerId() { return customerId; }
+    public long getAmount()       { return amount; }
+    public String getCurrency()   { return currency; }
+    public String getEventType()  { return eventType; }
+
+    @Override
+    public String toString() {
+        return "PaymentEvent{" +
+                "customerId='" + customerId + '\'' +
+                ", amount=" + amount +
+                ", currency='" + currency + '\'' +
+                ", eventType='" + eventType + '\'' +
+                '}';
+    }
+}
+```
+
+### PaymentEvent Constructor Parameters
+
+<ParamField path="customerId" type="String" required>
+  The unique identifier of the customer initiating the payment (e.g. `"C1002"`).
+</ParamField>
+
+<ParamField path="amount" type="long" required>
+  The payment amount in the smallest currency unit (e.g. `5000` for ₹5,000 in INR paise or simply the rupee amount as a long integer).
+</ParamField>
+
+<ParamField path="currency" type="String" required>
+  ISO 4217 currency code representing the denomination of the payment (e.g. `"INR"`, `"USD"`).
+</ParamField>
+
+<ParamField path="eventType" type="String" required>
+  A string label describing the event category. Use `"PAYMENT"` for standard payment transactions.
+</ParamField>
+
+## SchemaProducer Source
+
+`SchemaProducer` builds its `Properties` in two stages: first loading the Kafka broker connection (bootstrap servers, SASL_SSL credentials) from `KafkaConnection`, then merging in Schema Registry coordinates from `RegistryConnection`.
+
+```java
+package com.example.kafka.producer;
+
+import java.util.Properties;
+
+import com.example.kafka.connections.KafkaConnection;
+import com.example.kafka.connections.RegistryConnection;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import com.example.kafka.events.PaymentEvent;
+import org.apache.kafka.common.serialization.StringSerializer;
+import io.confluent.kafka.serializers.json.KafkaJsonSchemaSerializer;
+
+public class SchemaProducer {
+
+    public static void main(String[] args) {
+        Properties props = KafkaConnection.getProperties();
+        props.put("key.serializer", StringSerializer.class.getName());
+
+        props.put("value.serializer", KafkaJsonSchemaSerializer.class.getName());
+
+        // Adding schema properties into the producer properties
+        Properties schemaProps = RegistryConnection.getProperties();
+
+        // Appended the schema properties into the producer properties
+        props.putAll(schemaProps);
+
+        // now our props has ( bootstrap, key, secret, schema url, schema key secret,
+        // key serializer, value serializer )
+
+        // Creating event object to send to kafka topic
+        PaymentEvent paymentEvent = new PaymentEvent("C1002", 5000, "INR", "PAYMENT");
+
+        try (KafkaProducer<String, PaymentEvent> producer = new KafkaProducer<>(props)) {
+
+            // Assign a key and mention the topic name to send the event to kafka topic
+            ProducerRecord<String, PaymentEvent> record =
+                    new ProducerRecord<>("orders", "C1002", paymentEvent);
+
+            // .get() waits for the broker to acknowledge (like .then() in JavaScript)
+            producer.send(record).get();
+
+            System.out.println("Payment event successfully sent!");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+## Merged Producer Properties
+
+After `props.putAll(schemaProps)` executes, the `Properties` object contains the full set of configuration the producer needs. The table below shows which class contributes each property:
+
+| Property | Value | Source |
+|---|---|---|
+| `bootstrap.servers` | Confluent Cloud broker URL | `KafkaConnection` |
+| `security.protocol` | `SASL_SSL` | `KafkaConnection` |
+| `sasl.mechanism` | `PLAIN` | `KafkaConnection` |
+| `sasl.jaas.config` | `PlainLoginModule` with API key/secret | `KafkaConnection` |
+| `key.serializer` | `StringSerializer` | `SchemaProducer` |
+| `value.serializer` | `KafkaJsonSchemaSerializer` | `SchemaProducer` |
+| `schema.registry.url` | Confluent Schema Registry URL | `RegistryConnection` |
+| `basic.auth.credentials.source` | `USER_INFO` | `RegistryConnection` |
+| `basic.auth.user.info` | `<SR_API_KEY>:<SR_API_SECRET>` | `RegistryConnection` |
+
+<Note>
+  `RegistryConnection` reads `SCHEMA_REGISTRY_URL`, `SCHEMA_REGISTRY_API_KEY`, and `SCHEMA_REGISTRY_API_SECRET` from your `.env` file using dotenv-java. These are separate credentials from the Kafka broker API key — make sure both sets are populated before running.
+</Note>
+
+## How KafkaJsonSchemaSerializer Works
+
+<Steps>
+  <Step title="Reflect the POJO">
+    On the first call to `producer.send()`, `KafkaJsonSchemaSerializer` uses Jackson to introspect `PaymentEvent` and derives a JSON Schema from its public getters (`customerId`, `amount`, `currency`, `eventType`).
+  </Step>
+  <Step title="Register with Schema Registry">
+    The serializer sends the derived schema to Confluent Schema Registry under the subject `orders-value` (topic name + `-value` by default). The registry assigns a schema ID (an integer). If the schema is already registered, the existing ID is returned.
+  </Step>
+  <Step title="Encode the message">
+    Each serialized message is prefixed with a 5-byte magic header:
+    - 1 byte: magic byte `0x00`
+    - 4 bytes: schema ID (big-endian int)
+
+    The remainder of the bytes is the JSON-serialized payload. Consumers use the ID to look up and validate the schema before deserializing.
+  </Step>
+</Steps>
+
+<Accordion title="Why use Schema Registry over raw JSON strings?">
+  Raw JSON strings have no enforced contract — a producer can change field names or types without any consumer knowing until a runtime deserialization error occurs. Schema Registry provides:
+
+  - **Schema evolution tracking** — every version of a schema is stored and can be compared for compatibility.
+  - **Forward / backward compatibility checks** — the registry can reject schema changes that would break existing consumers.
+  - **Self-describing messages** — the schema ID in every message lets consumers retrieve the exact schema used to write it.
+</Accordion>
+
+## Required `.env` Variables
+
+```properties
+# Confluent Cloud Kafka broker
+KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.region.provider.confluent.cloud:9092
+KAFKA_API_KEY=your_kafka_api_key
+KAFKA_API_SECRET=your_kafka_api_secret
+
+# Confluent Schema Registry
+SCHEMA_REGISTRY_URL=https://psrc-xxxxx.region.provider.confluent.cloud
+SCHEMA_REGISTRY_API_KEY=your_schema_registry_api_key
+SCHEMA_REGISTRY_API_SECRET=your_schema_registry_api_secret
+```
+
+## Running SchemaProducer
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.producer.SchemaProducer
+```
+
+Expected output:
+```
+Payment event successfully sent!
+```
+
+<Tip>
+  After running, navigate to the **Schema Registry** section in the Confluent Cloud console and look for the `orders-value` subject. You will see the inferred JSON Schema for `PaymentEvent` registered there, ready to enforce on all future producers and consumers of the `orders` topic.
+</Tip>
+
+<Warning>
+  The `orders` topic must exist before running this producer. If auto-creation is disabled on the cluster, create it first using the Confluent Cloud UI, the Confluent CLI (`confluent kafka topic create orders`), or the `AdminTopicManager` class in this project.
+</Warning>

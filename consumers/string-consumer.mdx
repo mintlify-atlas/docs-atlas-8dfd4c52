@@ -1,0 +1,240 @@
+---
+title: "Consume string messages from Kafka with offset tracking"
+sidebarTitle: "String Consumer"
+description: "Consumer subscribes to the orders topic using StringDeserializer, polls in an infinite loop, and prints key, value, partition, and offset for each record."
+---
+
+The `Consumer` class is the simplest end-to-end Kafka consumer in this project. It connects to the `orders` topic, joins a named consumer group, and enters an infinite poll loop — printing the key, value, partition, and offset for every record it receives. Because both keys and values are plain UTF-8 strings, no special serialization library is required beyond the built-in `StringDeserializer`. This page walks through every configuration property, explains the polling model, and shows you how to run the consumer locally.
+
+## Complete Source
+
+```java
+package com.example.kafka.consumer;
+
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+
+import java.time.Duration;
+import java.util.Collections;
+import java.util.Properties;
+
+import com.example.kafka.connections.KafkaConnection;
+
+public class Consumer {
+
+    public static void main(String[] args) {
+
+        Properties props = KafkaConnection.getProperties();
+
+        // Deserializer for the key
+        props.put(
+                ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,
+                StringDeserializer.class.getName()
+        );
+
+        // Deserializer for the value
+        props.put(
+                ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+                StringDeserializer.class.getName()
+        );
+
+        // Consumer group
+        props.put(
+                ConsumerConfig.GROUP_ID_CONFIG,
+                "payment-consumer-group"
+        );
+
+        // Start from the earliest available record
+        props.put(
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,
+                "earliest"
+        );
+
+        try (KafkaConsumer<String, String> consumer =
+                     new KafkaConsumer<>(props)) {
+
+            // Subscribe to our topic
+            consumer.subscribe(
+                    Collections.singletonList("orders")
+            );
+
+            System.out.println("Consumer started...");
+            System.out.println("Waiting for events...");
+
+            while (true) {
+
+                ConsumerRecords<String, String> records =
+                        consumer.poll(Duration.ofSeconds(1));
+
+                records.forEach(record -> {
+
+                    System.out.println(
+                            "Received event:"
+                    );
+
+                    System.out.println(
+                            "Key: " + record.key()
+                    );
+
+                    System.out.println(
+                            "Value: " + record.value()
+                    );
+
+                    System.out.println(
+                            "Partition: " + record.partition()
+                    );
+
+                    System.out.println(
+                            "Offset: " + record.offset()
+                    );
+                });
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+## Configuration Properties
+
+The consumer builds its `Properties` object in two stages. First, `KafkaConnection.getProperties()` supplies the broker address and SASL/SSL credentials. Then the consumer appends its own four properties on top.
+
+<Tabs>
+  <Tab title="Deserialization">
+    <ParamField body="KEY_DESERIALIZER_CLASS_CONFIG" type="StringDeserializer" required>
+      Decodes the record key bytes back into a `String`. Every Kafka consumer must declare both a key and a value deserializer even when one side is unused.
+    </ParamField>
+
+    <ParamField body="VALUE_DESERIALIZER_CLASS_CONFIG" type="StringDeserializer" required>
+      Decodes the record value bytes back into a `String`. Because the matching producer also wrote plain string values, no schema or binary codec is needed here.
+    </ParamField>
+  </Tab>
+
+  <Tab title="Group & Offset">
+    <ParamField body="GROUP_ID_CONFIG" type="string" required>
+      Set to `"payment-consumer-group"`. Every consumer instance that shares the same group ID cooperates to consume the topic's partitions without duplicating work. Kafka tracks committed offsets per group, so restarting the process (with the same group ID) continues from where it left off.
+    </ParamField>
+
+    <ParamField body="AUTO_OFFSET_RESET_CONFIG" type="string" required>
+      Set to `"earliest"`. When a consumer group has no committed offset for a partition — for example, the very first time it connects — this setting tells Kafka to replay all messages from the beginning of the partition's retained log rather than skipping to the newest message (`"latest"`).
+    </ParamField>
+  </Tab>
+
+  <Tab title="Broker Connection">
+    <ParamField body="bootstrap.servers" type="string" required>
+      Loaded from the `KAFKA_BOOTSTRAP_SERVERS` environment variable via `KafkaConnection`. Points to the Confluent Cloud (or local) broker endpoint.
+    </ParamField>
+
+    <ParamField body="security.protocol" type="string">
+      `SASL_SSL` — all traffic is encrypted with TLS and authenticated via SASL.
+    </ParamField>
+
+    <ParamField body="sasl.mechanism" type="string">
+      `PLAIN` — credentials are transmitted as a username/password pair inside the SASL exchange.
+    </ParamField>
+
+    <ParamField body="sasl.jaas.config" type="string">
+      Inlines the `KAFKA_API_KEY` and `KAFKA_API_SECRET` environment variables into the JAAS login configuration string at runtime.
+    </ParamField>
+  </Tab>
+</Tabs>
+
+## Consumer Group ID and Offset Tracking
+
+Kafka's consumer group model is what makes horizontal scaling possible. Every record published to the `orders` topic is stored in one or more partitions. When multiple consumer instances share the same `group.id`, Kafka assigns each partition to exactly one instance in the group — no record is processed twice by the same group.
+
+<CardGroup cols={2}>
+  <Card title="Offset Committed per Group" icon="bookmark">
+    After each successful poll, Kafka automatically commits the highest offset seen (by default, `enable.auto.commit=true`). If the process crashes and restarts with the same group ID, it resumes from the last committed offset.
+  </Card>
+  <Card title="Independent Groups" icon="users">
+    Two different group IDs consume the same topic completely independently. The `"payment-consumer-group"` used here will have its own offset cursor, separate from any other consumer group on the same `orders` topic.
+  </Card>
+</CardGroup>
+
+## The `poll(Duration)` Loop
+
+Kafka consumers are pull-based: the broker never pushes records to the client. Instead, the consumer calls `poll()` at regular intervals, and the broker returns a batch of records (up to configured limits) that have arrived since the last poll.
+
+```java
+ConsumerRecords<String, String> records =
+        consumer.poll(Duration.ofSeconds(1));
+```
+
+The `Duration.ofSeconds(1)` argument is the **maximum time** the call will block waiting for data. If records are already available, `poll()` returns immediately. If none arrive within one second, it returns an empty collection and the loop iterates again. This tight loop keeps the consumer alive and continuously draining the topic.
+
+<Accordion title="Why not use a longer poll timeout?">
+  A very long timeout (e.g., `Duration.ofMinutes(5)`) would cause the consumer to stall for up to five minutes between polls when the topic is idle. More importantly, Kafka's broker tracks consumer liveness using the `max.poll.interval.ms` setting (default 5 minutes). If a consumer does not call `poll()` within that window, the broker considers it dead and triggers a partition rebalance. A short 1-second timeout keeps the heartbeat healthy without burning CPU when the topic is quiet.
+</Accordion>
+
+## Expected Console Output
+
+When the consumer starts, it prints two status lines. As records arrive from the `orders` topic, each one produces a four-line block:
+
+```text
+Consumer started...
+Waiting for events...
+Received event:
+Key: order-001
+Value: Payment for order 001
+Partition: 0
+Offset: 0
+Received event:
+Key: order-002
+Value: Payment for order 002
+Partition: 0
+Offset: 1
+```
+
+The `partition` field tells you which Kafka partition held the record, and `offset` is the record's zero-based index within that partition. Together, partition + offset form a globally unique address for any record in the topic.
+
+## Running the Consumer
+
+<Steps>
+  <Step title="Ensure the .env file is present">
+    The consumer reads broker credentials from a `.env` file in the project root via `dotenv-java`. Make sure it contains:
+
+    ```properties
+    KAFKA_BOOTSTRAP_SERVERS=<your-broker-endpoint>
+    KAFKA_API_KEY=<your-api-key>
+    KAFKA_API_SECRET=<your-api-secret>
+    ```
+  </Step>
+
+  <Step title="Produce some messages first (optional)">
+    To have records waiting when the consumer starts, run the string producer in a separate terminal:
+
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.producer.Producer
+    ```
+  </Step>
+
+  <Step title="Start the consumer">
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.consumer.Consumer
+    ```
+
+    Because `AUTO_OFFSET_RESET_CONFIG` is set to `"earliest"`, any records already in the `orders` topic (within the retention window) will be replayed immediately on the first poll.
+  </Step>
+</Steps>
+
+<Note>
+  The consumer runs in an infinite `while (true)` loop and will never exit on its own. Press **Ctrl+C** in your terminal to send an interrupt signal and stop the process. The `try-with-resources` block ensures the `KafkaConsumer` is cleanly closed — revoking its partition assignments and notifying the group coordinator — before the JVM exits.
+</Note>
+
+<Tip>
+  If you want to replay all messages from the start on every run, delete the committed offsets for the group by resetting it:
+
+  ```bash
+  kafka-consumer-groups --bootstrap-server <broker> \
+    --group payment-consumer-group \
+    --topic orders \
+    --reset-offsets --to-earliest --execute
+  ```
+
+  Because `AUTO_OFFSET_RESET_CONFIG` only applies when **no** committed offset exists, resetting the group's offsets is the correct way to re-read historical data.
+</Tip>

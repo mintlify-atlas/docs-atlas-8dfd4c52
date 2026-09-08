@@ -1,0 +1,202 @@
+---
+title: "JSON Schema serialization with Confluent Schema Registry"
+sidebarTitle: "JSON Schema"
+description: "Use KafkaJsonSchemaSerializer and KafkaJsonSchemaDeserializer to produce and consume type-safe events validated against schemas registered in Confluent Schema Registry."
+---
+
+Confluent's `kafka-json-schema-serializer` brings the governance of Schema Registry to plain JSON Kafka messages. Rather than compiling a schema file ahead of time, you write a standard Java POJO and let the serializer derive a JSON Schema from it via Jackson reflection. The derived schema is registered in Schema Registry on the first `produce` call, and a compact schema ID is embedded in every message header. Consumers retrieve the schema by ID, validate the payload, and deserialize it back to the original POJO — giving you the round-trip type safety of Avro with the readability of JSON.
+
+## The `PaymentEvent` POJO
+
+`PaymentEvent` is the Java class used as the message value for JSON Schema-serialized Kafka records. It carries the same four fields as the Avro counterpart but lives in ordinary handwritten Java — no code generation required.
+
+```java
+package com.example.kafka.events;
+
+public class PaymentEvent {
+
+    private String customerId;
+    private long amount;
+    private String currency;
+    private String eventType;
+
+    public PaymentEvent(String customerId,
+                        long amount,
+                        String currency,
+                        String eventType) {
+        this.customerId = customerId;
+        this.amount = amount;
+        this.currency = currency;
+        this.eventType = eventType;
+    }
+
+    public String getCustomerId() {
+        return customerId;
+    }
+
+    public long getAmount() {
+        return amount;
+    }
+
+    public String getCurrency() {
+        return currency;
+    }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    @Override
+    public String toString() {
+        return "PaymentEvent{" +
+                "customerId='" + customerId + '\'' +
+                ", amount=" + amount +
+                ", currency='" + currency + '\'' +
+                ", eventType='" + eventType + '\'' +
+                '}';
+    }
+}
+```
+
+<Note>
+`PaymentEvent` has **no schema annotations** (no `@Schema`, no `@JsonProperty`, no `@JsonDeserialize`). `KafkaJsonSchemaSerializer` uses Jackson's standard reflection to inspect the class at runtime — getters, field names, and Java types are all it needs to build the JSON Schema.
+</Note>
+
+---
+
+## Field Reference
+
+<ParamField path="customerId" type="String" required>
+  Unique identifier for the customer. Serialized as a JSON `string`. Jackson reads this from the `getCustomerId()` getter.
+</ParamField>
+
+<ParamField path="amount" type="long" required>
+  Payment amount as a 64-bit integer (e.g. smallest currency unit). Serialized as a JSON `integer`. Jackson reads this from the `getAmount()` getter.
+</ParamField>
+
+<ParamField path="currency" type="String" required>
+  ISO 4217 currency code (e.g. `"INR"`). Serialized as a JSON `string`. Jackson reads this from the `getCurrency()` getter.
+</ParamField>
+
+<ParamField path="eventType" type="String" required>
+  Event discriminator string (e.g. `"PAYMENT"`). Serialized as a JSON `string`. Jackson reads this from the `getEventType()` getter.
+</ParamField>
+
+---
+
+## How the Serializer and Deserializer Work
+
+<Tabs>
+  <Tab title="Producer — KafkaJsonSchemaSerializer">
+    When `KafkaJsonSchemaSerializer` serializes a `PaymentEvent` for the first time, it performs three steps automatically:
+
+    1. **Derives a JSON Schema** from the POJO class using Jackson's `JsonSchemaGenerator`. The result is a standard [JSON Schema](https://json-schema.org/) document describing all fields, types, and whether they are required.
+    2. **Registers the schema** in Confluent Schema Registry under the subject `<topic>-value`. If an identical schema is already registered, the existing ID is reused.
+    3. **Encodes the message** as a 5-byte magic header (magic byte `0x0` + 4-byte schema ID) followed by the UTF-8 JSON payload.
+
+    ```java
+    // Producer properties (excerpt)
+    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
+              KafkaJsonSchemaSerializer.class.getName());
+    props.put("schema.registry.url", "http://localhost:8081");
+
+    // Producing a PaymentEvent
+    PaymentEvent event = new PaymentEvent("C1001", 5000L, "INR", "PAYMENT");
+    ProducerRecord<String, PaymentEvent> record =
+            new ProducerRecord<>("payments-json", event.getCustomerId(), event);
+    producer.send(record);
+    ```
+  </Tab>
+
+  <Tab title="Consumer — KafkaJsonSchemaDeserializer">
+    On the consumer side, `KafkaJsonSchemaDeserializer` reverses the process:
+
+    1. **Reads the schema ID** from the first 5 bytes of the message.
+    2. **Fetches the schema** from Schema Registry by ID (cached after first fetch).
+    3. **Validates and deserializes** the JSON payload using Jackson, mapping it back to the configured target class.
+
+    ```java
+    // Consumer properties (excerpt)
+    props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG,
+              KafkaJsonSchemaDeserializer.class.getName());
+    props.put("schema.registry.url", "http://localhost:8081");
+    props.put(KafkaJsonSchemaDeserializerConfig.JSON_VALUE_TYPE,
+              PaymentEvent.class.getName());
+
+    // Consuming
+    ConsumerRecords<String, PaymentEvent> records = consumer.poll(Duration.ofMillis(1000));
+    for (ConsumerRecord<String, PaymentEvent> r : records) {
+        PaymentEvent event = r.value();
+        System.out.println(event);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Both the producer and consumer **must** point to the same Schema Registry URL. If the registry is unreachable on first produce, `KafkaJsonSchemaSerializer` throws a `SerializationException` before any message is sent to Kafka.
+</Warning>
+
+---
+
+## Maven Dependency
+
+`kafka-json-schema-serializer` is a Confluent artifact that is not hosted on Maven Central. Add both the dependency and the Confluent repository to your `pom.xml`:
+
+```xml
+<!-- Confluent Maven Repository -->
+<repositories>
+    <repository>
+        <id>confluent</id>
+        <url>https://packages.confluent.io/maven/</url>
+    </repository>
+</repositories>
+
+<!-- Confluent JSON Schema Serializer -->
+<dependency>
+    <groupId>io.confluent</groupId>
+    <artifactId>kafka-json-schema-serializer</artifactId>
+    <version>8.3.1</version>
+</dependency>
+
+<!-- Jackson databind (JSON serialization engine) -->
+<dependency>
+    <groupId>com.fasterxml.jackson.core</groupId>
+    <artifactId>jackson-databind</artifactId>
+    <version>2.17.2</version>
+</dependency>
+```
+
+---
+
+## JSON Schema vs. Avro: When to Use Each
+
+Both serialization strategies integrate with Confluent Schema Registry and offer schema evolution, but they make different trade-offs.
+
+| Dimension | JSON Schema | Avro |
+|---|---|---|
+| **Wire format** | UTF-8 JSON text | Binary (compact) |
+| **Schema source** | POJO-first (Jackson reflection) | Schema-first (`.avsc` file) |
+| **Code generation** | Not required | Required (`avro-maven-plugin`) |
+| **Human-readable messages** | ✅ Yes — inspectable with any tool | ❌ No — binary encoding |
+| **Throughput** | Lower (larger payloads) | Higher (smaller payloads) |
+| **Schema evolution** | Compatible via Registry | Compatible via Registry |
+| **IDE support** | Immediate — use existing POJOs | After `mvn generate-sources` |
+| **Best for** | REST-style events, prototyping, debug-heavy workflows | High-throughput pipelines, long-term storage |
+
+<Accordion title="Schema evolution rules for JSON Schema">
+  Confluent Schema Registry enforces compatibility checks when you register a new version of a schema. For JSON Schema subjects, the default compatibility mode is **BACKWARD**: new consumers can read old messages, but old consumers cannot necessarily read new messages.
+
+  Safe backward-compatible changes include:
+  - Adding a new **optional** field (with a default value or nullable type).
+  - Widening a numeric type (e.g. `integer` → `number`).
+
+  Breaking changes that require a compatibility override:
+  - Removing an existing field.
+  - Renaming a field.
+  - Changing a field from optional to required.
+</Accordion>
+
+<Tip>
+Use JSON Schema when you are iterating quickly, when your downstream consumers are non-JVM systems that expect plain JSON, or when operational simplicity matters more than raw throughput. Switch to Avro when message volume is high enough that binary encoding makes a measurable difference in broker storage and network cost.
+</Tip>

@@ -1,0 +1,217 @@
+---
+title: "Environment variable configuration reference"
+sidebarTitle: "Configuration"
+description: "Complete reference for all environment variables used by Kafka Learning: Kafka broker credentials, Schema Registry credentials, and which classes require each variable."
+---
+
+Kafka Learning uses `dotenv-java` to load configuration at runtime from a `.env` file (or from real environment variables when running inside a container). There are two logical groups of variables: Kafka broker credentials consumed by `KafkaConnection`, and Schema Registry credentials consumed by `RegistryConnection`. Understanding which classes require each group helps you build minimal `.env` files for testing and avoids runtime errors caused by missing values.
+
+## Complete `.env` File Example
+
+Create this file in the project root before running any class that connects to Confluent Cloud. Replace every placeholder value with the real credentials from your Confluent Cloud console.
+
+```properties
+# Kafka Broker (Confluent Cloud)
+KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.us-east-1.aws.confluent.cloud:9092
+KAFKA_API_KEY=YOUR_KAFKA_API_KEY
+KAFKA_API_SECRET=YOUR_KAFKA_API_SECRET
+
+# Schema Registry (Confluent Cloud)
+SCHEMA_REGISTRY_URL=https://psrc-xxxxx.us-east-1.aws.confluent.cloud
+SCHEMA_REGISTRY_API_KEY=YOUR_SCHEMA_REGISTRY_API_KEY
+SCHEMA_REGISTRY_API_SECRET=YOUR_SCHEMA_REGISTRY_API_SECRET
+```
+
+<Warning>
+  **Never commit your `.env` file to Git.** It contains plaintext API keys and secrets for your Confluent Cloud cluster. Add `.env` to your `.gitignore` immediately:
+
+  ```bash
+  echo ".env" >> .gitignore
+  ```
+
+  Use a `.env.example` file with placeholder values as a safe template to check in instead.
+</Warning>
+
+---
+
+## Kafka Broker Variables
+
+These three variables are read by `KafkaConnection.getProperties()` and are required by every class that connects to Confluent Cloud (producers, consumers, and admin clients alike).
+
+```java
+// KafkaConnection.java
+Dotenv dotenv = Dotenv.load();
+
+String bootstrapServers = dotenv.get("KAFKA_BOOTSTRAP_SERVERS");
+String apiKey           = dotenv.get("KAFKA_API_KEY");
+String apiSecret        = dotenv.get("KAFKA_API_SECRET");
+
+props.put("bootstrap.servers",  bootstrapServers);
+props.put("security.protocol",  "SASL_SSL");
+props.put("sasl.mechanism",     "PLAIN");
+props.put("sasl.jaas.config",
+    "org.apache.kafka.common.security.plain.PlainLoginModule required " +
+    "username=\"" + apiKey + "\" " +
+    "password=\"" + apiSecret + "\";");
+```
+
+<ParamField path="KAFKA_BOOTSTRAP_SERVERS" type="string" required>
+  The bootstrap server address of your Confluent Cloud Kafka cluster, including the port. This is the initial contact point the Kafka client uses to discover brokers and cluster metadata.
+
+  **Example:** `pkc-xxxxx.us-east-1.aws.confluent.cloud:9092`
+</ParamField>
+
+<ParamField path="KAFKA_API_KEY" type="string" required>
+  The API key for your Confluent Cloud Kafka cluster. This value is used as the SASL/PLAIN username in the `sasl.jaas.config` property. Generate API keys in the **Confluent Cloud Console → Kafka cluster → API Keys**.
+
+  **Example:** `ABCDEFGH12345678`
+</ParamField>
+
+<ParamField path="KAFKA_API_SECRET" type="string" required>
+  The API secret that pairs with `KAFKA_API_KEY`. Used as the SASL/PLAIN password. This value is shown only once at creation time — store it securely.
+
+  **Example:** `abc123xyz/ALONGSECRETSTRINGFROMCONFLUENT`
+</ParamField>
+
+---
+
+## Schema Registry Variables
+
+These three variables are read by `RegistryConnection.getProperties()` and are merged into the producer or consumer `Properties` object alongside the broker variables. They are required only by classes that use Avro or JSON Schema serialization.
+
+```java
+// RegistryConnection.java
+Dotenv dotenv = Dotenv.load();
+
+String schemaRegistryUrl       = dotenv.get("SCHEMA_REGISTRY_URL");
+String schemaRegistryApiKey    = dotenv.get("SCHEMA_REGISTRY_API_KEY");
+String schemaRegistryApiSecret = dotenv.get("SCHEMA_REGISTRY_API_SECRET");
+
+props.put("schema.registry.url",             schemaRegistryUrl);
+props.put("basic.auth.credentials.source",   "USER_INFO");
+props.put("basic.auth.user.info",
+    schemaRegistryApiKey + ":" + schemaRegistryApiSecret);
+```
+
+<ParamField path="SCHEMA_REGISTRY_URL" type="string" required>
+  The full HTTPS URL of your Confluent Schema Registry. The client uses this to register new schemas and look up existing ones by subject name during serialization and deserialization.
+
+  **Example:** `https://psrc-xxxxx.us-east-1.aws.confluent.cloud`
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_API_KEY" type="string" required>
+  The API key for your Confluent Schema Registry. Passed as the username portion of HTTP Basic Auth (`USER_INFO` credential source). Generate Schema Registry API keys in the **Confluent Cloud Console → Schema Registry → API Keys**.
+
+  **Example:** `SR_API_KEY_HERE`
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_API_SECRET" type="string" required>
+  The API secret that pairs with `SCHEMA_REGISTRY_API_KEY`. Passed as the password portion of HTTP Basic Auth. Combined with the key as `key:secret` in the `basic.auth.user.info` property.
+
+  **Example:** `SR_API_SECRET_HERE`
+</ParamField>
+
+---
+
+## Class-to-Variable Mapping
+
+The table below shows every runnable class, which connection helper it uses, and whether Schema Registry variables are required.
+
+| Class | Package | Connection Used | Schema Registry Required? |
+|---|---|---|---|
+| `Producer` | `producer` | `KafkaConnection` | ❌ No |
+| `LocalProducer` | `producer` | `KafkaLocalConnection` | ❌ No |
+| `AvroProducer` | `producer` | `KafkaConnection` + `RegistryConnection` | ✅ Yes |
+| `SchemaProducer` | `producer` | `KafkaConnection` + `RegistryConnection` | ✅ Yes |
+| `DynamicProductProducer` | `producer` | `KafkaConnection` + `RegistryConnection` | ✅ Yes |
+| `Consumer` | `consumer` | `KafkaConnection` | ❌ No |
+| `SchemaConsumer` | `consumer` | `KafkaConnection` + `RegistryConnection` | ✅ Yes |
+| `KafkaTopicCreator` | `admin` | `KafkaConnection` | ❌ No |
+| `KafkaTopicDeleter` | `admin` | `KafkaConnection` | ❌ No |
+| `KafkaConnectionTest` | `admin` | `KafkaConnection` | ❌ No |
+
+<Note>
+  **`LocalProducer` requires no environment variables at all.** It uses `KafkaLocalConnection`, which hardcodes `localhost:9092` as the bootstrap server and sets no authentication properties. This makes it ideal for experimenting with a locally running Kafka broker (e.g. via Docker Compose) before obtaining Confluent Cloud credentials.
+
+  ```java
+  // KafkaLocalConnection.java — no Dotenv, no credentials
+  props.put(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+  ```
+</Note>
+
+---
+
+## Variable Requirements by Scenario
+
+<Tabs>
+  <Tab title="Confluent Cloud (no Schema Registry)">
+    You only need the three Kafka broker variables. Suitable for `Producer`, `Consumer`, and all admin classes.
+
+    ```properties
+    KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.us-east-1.aws.confluent.cloud:9092
+    KAFKA_API_KEY=YOUR_KAFKA_API_KEY
+    KAFKA_API_SECRET=YOUR_KAFKA_API_SECRET
+    ```
+  </Tab>
+  <Tab title="Confluent Cloud + Schema Registry">
+    All six variables are required. Needed for `AvroProducer`, `SchemaProducer`, `SchemaConsumer`, and `DynamicProductProducer`.
+
+    ```properties
+    KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.us-east-1.aws.confluent.cloud:9092
+    KAFKA_API_KEY=YOUR_KAFKA_API_KEY
+    KAFKA_API_SECRET=YOUR_KAFKA_API_SECRET
+
+    SCHEMA_REGISTRY_URL=https://psrc-xxxxx.us-east-1.aws.confluent.cloud
+    SCHEMA_REGISTRY_API_KEY=YOUR_SCHEMA_REGISTRY_API_KEY
+    SCHEMA_REGISTRY_API_SECRET=YOUR_SCHEMA_REGISTRY_API_SECRET
+    ```
+  </Tab>
+  <Tab title="Local Kafka (no .env needed)">
+    `LocalProducer` uses `KafkaLocalConnection` and does not call `Dotenv.load()`. No `.env` file is required. Ensure a Kafka broker is reachable at `localhost:9092`.
+
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.producer.LocalProducer
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## How `dotenv-java` Resolves Variables
+
+`dotenv-java` (version 3.0.2) applies the following resolution order:
+
+<Steps>
+  <Step title="Check real environment variables">
+    If a variable is already set in the process environment (e.g. injected via `docker run --env-file .env` or a CI secret), `Dotenv.load()` returns that value directly.
+  </Step>
+  <Step title="Fall back to .env file">
+    If the variable is not in the environment, `dotenv-java` looks for a `.env` file in the working directory and reads it.
+  </Step>
+  <Step title="Throw if missing">
+    If the variable is absent from both sources, `dotenv.get("VAR_NAME")` throws a `MissingDotenvEntryException` at startup — failing fast before any Kafka connection is attempted.
+  </Step>
+</Steps>
+
+<Tip>
+  When running inside Docker, use `docker run --env-file .env kafka-learning` rather than baking credentials into the image. The `--env-file` flag injects each line as a real environment variable, which `dotenv-java` picks up in Step 1 above — no `.env` file needs to exist inside the container.
+</Tip>
+
+---
+
+## Obtaining Credentials from Confluent Cloud
+
+<CardGroup cols={2}>
+  <Card title="Kafka API Keys" icon="key" href="https://confluent.cloud">
+    Navigate to your Kafka cluster → **API Keys** → **Add key**. Choose **Global access** for development or a service account for production. Copy the key and secret immediately — the secret is shown only once.
+  </Card>
+  <Card title="Schema Registry API Keys" icon="database" href="https://confluent.cloud">
+    Navigate to **Environments** → your environment → **Schema Registry** → **API Keys** → **Add key**. These credentials are separate from your Kafka cluster credentials.
+  </Card>
+  <Card title="Bootstrap Server Address" icon="server">
+    Found in your Kafka cluster overview under **Cluster settings → Endpoints → Bootstrap server**. It follows the pattern `pkc-xxxxx.region.provider.confluent.cloud:9092`.
+  </Card>
+  <Card title="Schema Registry URL" icon="link">
+    Found in **Environments** → your environment → **Schema Registry** → **Endpoint**. It follows the pattern `https://psrc-xxxxx.region.provider.confluent.cloud`.
+  </Card>
+</CardGroup>

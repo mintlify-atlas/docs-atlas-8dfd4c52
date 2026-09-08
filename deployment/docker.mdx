@@ -1,0 +1,190 @@
+---
+title: "Build and run Kafka Learning with Docker"
+sidebarTitle: "Docker"
+description: "Two-stage Dockerfile: Stage 1 builds a fat JAR with Maven Shade plugin; Stage 2 runs DynamicProductProducer on a lean Eclipse Temurin JRE Alpine image."
+---
+
+Kafka Learning ships with a two-stage Dockerfile that keeps the final image small and production-ready. The first stage uses a full Maven + JDK image to compile the project and bundle all dependencies into a single executable JAR via the Maven Shade plugin. The second stage copies only that JAR into a minimal Alpine-based JRE image — no source code, no Maven cache, no build tooling — and launches `DynamicProductProducer` as the container's entry point. The result is a portable, self-contained image you can run anywhere with a single `docker run` command and a `.env` file.
+
+## The Dockerfile
+
+The complete Dockerfile uses two `FROM` stages, each with a clear responsibility: build or run. Keeping them separate means your final image never contains the hundreds of megabytes of Maven dependencies that were downloaded only to compile the project.
+
+```dockerfile
+# ---------- Stage 1: Build ----------
+FROM maven:3.9-eclipse-temurin-17 AS build
+
+WORKDIR /app
+
+# Copy pom first so dependency layer is cached separately from source changes
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+
+# Copy source and build the fat jar (requires maven-shade-plugin in pom.xml)
+COPY src ./src
+RUN mvn clean package -DskipTests
+
+# ---------- Stage 2: Runtime ----------
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+# Only the built jar comes into the final image — no Maven, no source, no .m2 cache
+COPY --from=build /app/target/*.jar app.jar
+
+# This image's job is the recurring producer run (DynamicProductProducer),
+# set as the fat jar's Main-Class via maven-shade-plugin in pom.xml.
+# Admin one-off tasks (KafkaTopicCreator/Deleter) are run manually via
+# mvn exec:java locally, not baked into this scheduled image.
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+<Tip>
+  Because `pom.xml` is copied and `mvn dependency:go-offline` runs **before** `COPY src ./src`, Docker caches the dependency download layer independently of your source code. Rebuilding after a source-only change skips re-downloading the entire Maven dependency graph — a significant time saver on slow connections or in CI.
+</Tip>
+
+## Stage 1: Build with Maven
+
+<Steps>
+  <Step title="Base image">
+    `maven:3.9-eclipse-temurin-17` provides Maven 3.9 and a full JDK 17 in a single image — everything needed to compile Java source and resolve dependencies from Maven Central and the Confluent repository.
+  </Step>
+  <Step title="Dependency pre-fetch">
+    `COPY pom.xml .` followed by `RUN mvn dependency:go-offline -B` resolves and caches every dependency declared in `pom.xml` as a separate Docker layer. This layer is only invalidated when `pom.xml` itself changes.
+  </Step>
+  <Step title="Source compilation and fat JAR packaging">
+    `COPY src ./src` brings in your Java source tree, then `mvn clean package -DskipTests` compiles, generates Avro sources (via `avro-maven-plugin`), and invokes the `maven-shade-plugin` to produce a single runnable JAR in `target/`.
+  </Step>
+</Steps>
+
+## The Maven Shade Plugin Configuration
+
+The Shade plugin's `ManifestResourceTransformer` writes a `Main-Class` entry into the JAR manifest so `java -jar app.jar` knows which class to run. In `pom.xml` that class is set to `DynamicProductProducer`:
+
+```xml
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-shade-plugin</artifactId>
+    <version>3.5.1</version>
+    <executions>
+        <execution>
+            <phase>package</phase>
+            <goals>
+                <goal>shade</goal>
+            </goals>
+            <configuration>
+                <transformers>
+                    <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                        <mainClass>com.example.kafka.producer.DynamicProductProducer</mainClass>
+                    </transformer>
+                </transformers>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+This is the same `DynamicProductProducer` that fetches products from an external API, infers an Avro schema from the response, and streams all records to the `products` topic using `KafkaAvroSerializer`. When the container starts, this is exactly what runs.
+
+## Stage 2: Lean Runtime Image
+
+The runtime stage starts fresh from `eclipse-temurin:17-jre-alpine` — a JRE-only build on Alpine Linux. It contains no compiler, no Maven, and no source files.
+
+```dockerfile
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+COPY --from=build /app/target/*.jar app.jar
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+<CardGroup cols={2}>
+  <Card title="Alpine JRE vs. Maven Build Image" icon="scale-balanced">
+    `eclipse-temurin:17-jre-alpine` is typically under 200 MB. The `maven:3.9-eclipse-temurin-17` build image — including the downloaded `.m2` cache — can exceed 1 GB. Multi-stage builds discard the build stage entirely.
+  </Card>
+  <Card title="No Source, No Secrets" icon="shield-check">
+    Only the compiled JAR is copied into the final image. Source files, test code, and the Maven local repository are never present in the layer that gets pushed to a registry or deployed.
+  </Card>
+</CardGroup>
+
+## Building the Image
+
+Run the following command from the project root (the directory containing the `Dockerfile`):
+
+```bash
+docker build -t kafka-learning .
+```
+
+Docker executes both stages sequentially. On a warm cache (no changes to `pom.xml` or `src/`) the build completes in seconds because all layers are already cached.
+
+## Running the Container
+
+Pass your credentials to the container using the `--env-file` flag:
+
+```bash
+docker run --env-file .env kafka-learning
+```
+
+The `--env-file .env` flag reads every `KEY=VALUE` line from your local `.env` file and injects them as environment variables inside the container. `DynamicProductProducer` uses `KafkaConnection` and `RegistryConnection`, both of which load variables via `Dotenv.load()` — inside a container `dotenv-java` falls back to real environment variables when no `.env` file is present on disk, so `--env-file` is the correct way to supply credentials at runtime.
+
+<Tabs>
+  <Tab title="Expected Output">
+    ```
+    1. Fetching products from API...
+    2. Building sample set for schema inference...
+    3. Inferring schema from 30 sample records...
+    {
+      "type" : "record",
+      "name" : "Product",
+      ...
+    }
+    4. Producing records to topic 'products'...
+    Sent id=1 -> partition=0 offset=42
+    Sent id=2 -> partition=1 offset=17
+    ...
+    5. Done.
+    ```
+  </Tab>
+  <Tab title="With Custom Tag">
+    ```bash
+    # Tag for a container registry
+    docker build -t ghcr.io/your-org/kafka-learning:latest .
+    docker run --env-file .env ghcr.io/your-org/kafka-learning:latest
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Admin tasks — creating or deleting topics via `KafkaTopicCreator` and `KafkaTopicDeleter` — are intended to be run **locally** with `mvn exec:java -Dexec.mainClass=com.example.kafka.admin.KafkaTopicCreator`, not inside this Docker image. The fat JAR's `Main-Class` is fixed to `DynamicProductProducer`; running other classes via Docker would require overriding the entry point or building a separate image.
+</Note>
+
+## Quick Reference
+
+<Accordion title="Full build and run sequence">
+  ```bash
+  # 1. Ensure your .env file exists with valid credentials
+  cp .env.example .env
+  # Edit .env with your Confluent Cloud credentials
+
+  # 2. Build the image
+  docker build -t kafka-learning .
+
+  # 3. Run the producer
+  docker run --env-file .env kafka-learning
+
+  # 4. (Optional) Run admin tasks locally — not via Docker
+  mvn exec:java -Dexec.mainClass=com.example.kafka.admin.KafkaTopicCreator
+  mvn exec:java -Dexec.mainClass=com.example.kafka.admin.KafkaTopicDeleter
+  ```
+</Accordion>
+
+<Accordion title="Rebuilding after dependency changes">
+  If you add or update a dependency in `pom.xml`, Docker invalidates the `mvn dependency:go-offline` cache layer and re-downloads only what changed. All subsequent layers (source copy, compile, runtime stage) are also rebuilt.
+
+  ```bash
+  # Force a full rebuild with no cache
+  docker build --no-cache -t kafka-learning .
+  ```
+</Accordion>

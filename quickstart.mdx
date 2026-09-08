@@ -1,47 +1,281 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get started with Kafka Learning in Java"
+sidebarTitle: "Quickstart"
+description: "Clone the repo, configure your .env credentials, build with Maven, and send your first Kafka message in under five minutes."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+This guide walks you through cloning the repository, satisfying the prerequisites, wiring up your broker credentials, building the project, and running the plain-string producer and consumer pair against the `orders` topic. By the end you will have a working end-to-end Kafka message flow and a clear mental model of how the project's connection and serialization layers fit together.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+### Check prerequisites
+
+Before anything else, confirm that both required tools are present on your PATH.
+
+```bash
+java -version
+```
+
+You should see a Java 17 (or newer) runtime. The `pom.xml` sets `maven.compiler.release=17`, so an older JDK will fail at compile time.
+
+```bash
+mvn -v
+```
+
+You need Maven 3.9 or later. The output should include a line such as `Apache Maven 3.9.x`.
+
+<Note>
+  If you are missing either tool, install the [Eclipse Temurin JDK 17](https://adoptium.net/) and [Maven 3.9](https://maven.apache.org/download.cgi) before continuing.
+</Note>
+
+### Clone the repository
+
+```bash
+git clone https://github.com/Mithrajeeth/kafka-learning.git
+cd kafka-learning
+```
+
+The project root contains `pom.xml`, `Dockerfile`, and `src/`. All Maven commands must be run from this directory.
+
+### Configure your broker credentials
+
+The project reads credentials from a `.env` file using **dotenv-java**. Create that file in the project root — it is never committed to source control.
+
+<Tabs>
+  <Tab title="Confluent Cloud">
+    Confluent Cloud requires SASL/SSL authentication. `KafkaConnection` reads three variables and constructs the full JAAS config string automatically:
+
+    ```properties
+    # .env — Confluent Cloud credentials
+    KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.us-east-1.aws.confluent.cloud:9092
+    KAFKA_API_KEY=YOUR_CLUSTER_API_KEY
+    KAFKA_API_SECRET=YOUR_CLUSTER_API_SECRET
+    ```
+
+    Retrieve these values from the **Confluent Cloud Console → Cluster → API Keys** section. The bootstrap server string (including port `9092`) is shown under **Cluster Settings → Endpoints**.
+
+    Under the hood, `KafkaConnection.getProperties()` builds the following `Properties` object from those three variables:
+
+    ```java
+    props.put("bootstrap.servers", bootstrapServers);
+    props.put("security.protocol", "SASL_SSL");
+    props.put("sasl.mechanism", "PLAIN");
+    props.put("sasl.jaas.config",
+        "org.apache.kafka.common.security.plain.PlainLoginModule required " +
+        "username=\"" + apiKey + "\" " +
+        "password=\"" + apiSecret + "\";");
+    ```
+
+    <Tip>
+      If you also plan to use the Schema Registry-backed producers (`SchemaProducer`, `AvroProducer`, `DynamicProductProducer`), add three more variables to the same `.env` file:
+
+      ```properties
+      SCHEMA_REGISTRY_URL=https://psrc-xxxxx.us-east-2.aws.confluent.cloud
+      SCHEMA_REGISTRY_API_KEY=YOUR_SR_API_KEY
+      SCHEMA_REGISTRY_API_SECRET=YOUR_SR_API_SECRET
+      ```
+
+      These are read by `RegistryConnection.getProperties()` and are separate credentials from the cluster keys.
+    </Tip>
+  </Tab>
+
+  <Tab title="Local Kafka">
+    When working offline, use `KafkaLocalConnection` instead of `KafkaConnection`. It targets `localhost:9092` with no authentication and requires **no `.env` file at all** — just a running local broker.
+
+    Start a local broker with Docker:
 
     ```bash
-    npm install your-package
+    docker run -d \
+      --name kafka \
+      -p 9092:9092 \
+      -e KAFKA_NODE_ID=1 \
+      -e KAFKA_PROCESS_ROLES=broker,controller \
+      -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093 \
+      -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+      -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+      -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+      -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+      apache/kafka:latest
     ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+    `KafkaLocalConnection.getProperties()` produces the minimal properties object:
+
+    ```java
+    props.put(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+    ```
+
+    To run the local producer use `LocalProducer` (which targets the `payments` topic) instead of `Producer`:
 
     ```bash
-    your-cli init
+    mvn exec:java -Dexec.mainClass=com.example.kafka.producer.LocalProducer
     ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+    <Note>
+      The `Consumer` class uses `KafkaConnection` (Confluent Cloud). To consume from a local broker you would need to swap the connection class to `KafkaLocalConnection`. The `LocalProducer` source already shows you the exact pattern to follow.
+    </Note>
+  </Tab>
+</Tabs>
+
+### Build the project
+
+Run a full clean build from the project root. This also triggers Avro code generation (the `avro-maven-plugin` runs during `generate-sources`) so `PaymentAvro.java` is available before compilation:
+
+```bash
+mvn clean package
+```
+
+A successful build ends with output similar to:
+
+```
+[INFO] --- maven-shade-plugin:3.5.1:shade (default) @ kafka-learning ---
+[INFO] Replacing original artifact with shaded artifact.
+[INFO] BUILD SUCCESS
+[INFO] Total time: 45.2 s
+```
+
+The fat JAR is written to `target/kafka-learning-1.0-SNAPSHOT.jar` with `DynamicProductProducer` as its `Main-Class` (used by the Docker image). For local runs with `mvn exec:java` you specify the class explicitly, so the fat JAR's `Main-Class` entry does not affect you.
+
+<Warning>
+  If the build fails with a compile error about `PaymentAvro` not found, the Avro code generation step did not run. Re-run `mvn clean generate-sources compile package` to force the full lifecycle in sequence.
+</Warning>
+
+### Run the producer
+
+The `Producer` class sends a single hardcoded payment event to the `orders` topic using plain `StringSerializer` on both key and value:
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.producer.Producer
+```
+
+Internally, `Producer.main()` constructs this record and awaits broker acknowledgement:
+
+```java
+String paymentEvent = """
+        {
+            "customer_id": "C1001",
+            "amount": 5000,
+            "currency": "INR",
+            "event_type": "PAYMENT"
+        }
+        """;
+
+ProducerRecord<String, String> record =
+        new ProducerRecord<>("orders", "C1001", paymentEvent);
+
+producer.send(record).get();   // blocks until acknowledged
+
+System.out.println("Payment event successfully sent!");
+```
+
+**Expected output:**
+
+```
+Payment event successfully sent!
+```
+
+If you see a `TopicAuthorizationException` or `UnknownTopicOrPartitionException`, verify that:
+- The `orders` topic exists on your cluster (create it via the Console or `KafkaTopicCreator`).
+- Your API key has **Write** permission on the topic.
+
+### Run the consumer
+
+Open a **second terminal window** (keep it running while you test). The `Consumer` class joins the `payment-consumer-group` consumer group, resets to `earliest` offset, and polls indefinitely:
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.consumer.Consumer
+```
+
+Internally the consumer subscribes and loops:
+
+```java
+props.put(ConsumerConfig.GROUP_ID_CONFIG, "payment-consumer-group");
+props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+
+consumer.subscribe(Collections.singletonList("orders"));
+
+System.out.println("Consumer started...");
+System.out.println("Waiting for events...");
+
+while (true) {
+    ConsumerRecords<String, String> records =
+            consumer.poll(Duration.ofSeconds(1));
+
+    records.forEach(record -> {
+        System.out.println("Received event:");
+        System.out.println("Key: "       + record.key());
+        System.out.println("Value: "     + record.value());
+        System.out.println("Partition: " + record.partition());
+        System.out.println("Offset: "    + record.offset());
+    });
+}
+```
+
+**Expected output** (after the producer has sent at least one record):
+
+```
+Consumer started...
+Waiting for events...
+Received event:
+Key: C1001
+Value:
+        {
+            "customer_id": "C1001",
+            "amount": 5000,
+            "currency": "INR",
+            "event_type": "PAYMENT"
+        }
+
+Partition: 0
+Offset: 0
+```
+
+<Note>
+  Because `AUTO_OFFSET_RESET_CONFIG` is set to `earliest`, the consumer replays all existing records on the topic when it starts for the first time. After the committed offset is saved, subsequent starts only read new messages.
+</Note>
+
+The consumer runs until you press **Ctrl + C**. It will continue printing each new batch of records as they arrive.
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Environment variable reference
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<ParamField path="KAFKA_BOOTSTRAP_SERVERS" type="string" required>
+  The broker endpoint including port, e.g. `pkc-xxxxx.us-east-1.aws.confluent.cloud:9092`. Read by `KafkaConnection.getProperties()`.
+</ParamField>
+
+<ParamField path="KAFKA_API_KEY" type="string" required>
+  The cluster API key (username for SASL/PLAIN authentication). Read by `KafkaConnection.getProperties()`.
+</ParamField>
+
+<ParamField path="KAFKA_API_SECRET" type="string" required>
+  The cluster API secret (password for SASL/PLAIN authentication). Read by `KafkaConnection.getProperties()`.
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_URL" type="string">
+  Full HTTPS URL of the Confluent Schema Registry endpoint, e.g. `https://psrc-xxxxx.us-east-2.aws.confluent.cloud`. Required only for `SchemaProducer`, `SchemaConsumer`, `AvroProducer`, and `DynamicProductProducer`.
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_API_KEY" type="string">
+  Schema Registry API key. Combined with `SCHEMA_REGISTRY_API_SECRET` to form the `basic.auth.user.info` value. Required only for Schema Registry-backed classes.
+</ParamField>
+
+<ParamField path="SCHEMA_REGISTRY_API_SECRET" type="string">
+  Schema Registry API secret. Required only for Schema Registry-backed classes.
+</ParamField>
+
+## What to explore next
+
+<CardGroup cols={2}>
+  <Card title="Connections" icon="plug" href="/connections">
+    Deep-dive into all three connection factories and how they compose `Properties` for different client types.
+  </Card>
+  <Card title="Producers" icon="paper-plane" href="/producers">
+    Explore the JSON Schema, Avro, and dynamic schema producer variants beyond the plain-string `Producer`.
+  </Card>
+  <Card title="Consumers" icon="inbox" href="/consumers">
+    See how `SchemaConsumer` deserializes `PaymentEvent` objects using `KafkaJsonSchemaDeserializer`.
+  </Card>
+  <Card title="Admin" icon="sliders" href="/admin">
+    Create and delete topics programmatically, and verify connectivity before running producers.
+  </Card>
+</CardGroup>

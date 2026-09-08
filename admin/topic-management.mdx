@@ -1,0 +1,264 @@
+---
+title: "Create and delete Kafka topics via the Admin API"
+sidebarTitle: "Topic Management"
+description: "Use KafkaTopicCreator and KafkaTopicDeleter to programmatically manage Kafka topics. Creates the products topic with 3 partitions and replication factor 3."
+---
+
+Kafka topics must exist before producers can publish to them or consumers can subscribe. Rather than using the Confluent Cloud web UI or the `kafka-topics.sh` CLI, this project manages topics programmatically through the Kafka Admin API. `KafkaTopicCreator` creates the `products` topic with a specific partition and replication configuration, while `KafkaTopicDeleter` removes it — both relying on the same shared `KafkaConnection` helper for credentials.
+
+## Topics Used in This Project
+
+The project's producers and consumers reference four topics in total. All must exist on the broker before the corresponding examples are run.
+
+| Topic | Used by | Serialization |
+|---|---|---|
+| `orders` | `OrderProducer`, `OrderConsumer` | JSON (Jackson) |
+| `payments` | `PaymentProducer`, `PaymentConsumer` | JSON Schema (Confluent) |
+| `payments-avro` | `PaymentAvroProducer`, `PaymentAvroConsumer` | Avro (Confluent) |
+| `products` | `KafkaTopicCreator`, `KafkaTopicDeleter` | — (Admin API demo) |
+
+<Info>
+  The `orders`, `payments`, and `payments-avro` topics are typically created in advance (via the Confluent Cloud console or a separate provisioning step). The `products` topic is the explicit subject of the Admin API classes demonstrated on this page.
+</Info>
+
+---
+
+## KafkaTopicCreator
+
+`KafkaTopicCreator` connects to the broker, declares a `NewTopic` with the desired partition and replication settings, and submits it to the Admin API. The operation blocks until the broker confirms the topic has been created.
+
+### Source Code
+
+```java
+package com.example.kafka.admin;
+
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.NewTopic;
+
+import java.util.Collections;
+import java.util.Properties;
+
+import com.example.kafka.connections.KafkaConnection;
+
+public class KafkaTopicCreator {
+
+    public static void main(String[] args) {
+
+        Properties props = KafkaConnection.getProperties();
+
+        try (Admin admin = Admin.create(props)) {
+
+            System.out.println("Connected to Kafka");
+
+            NewTopic topic =
+                    new NewTopic("products", 3, (short) 3);
+
+            admin.createTopics(
+                    Collections.singleton(topic)
+            ).all().get();
+
+            System.out.println("Topic 'orders' created successfully!");
+
+        } catch (Exception e) {
+
+            System.out.println("Failed to create topic");
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+### How It Works
+
+<Steps>
+  <Step title="Load connection properties">
+    ```java
+    Properties props = KafkaConnection.getProperties();
+    ```
+
+    `KafkaConnection.getProperties()` reads `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_API_KEY`, and `KAFKA_API_SECRET` from the `.env` file and assembles a `Properties` object configured for `SASL_SSL` / `PLAIN` authentication.
+  </Step>
+  <Step title="Create the Admin client">
+    ```java
+    try (Admin admin = Admin.create(props)) {
+    ```
+
+    The try-with-resources block instantiates the Admin client and ensures it is closed after the operation completes, regardless of whether an exception is thrown.
+  </Step>
+  <Step title="Define the new topic">
+    ```java
+    NewTopic topic = new NewTopic("products", 3, (short) 3);
+    ```
+
+    `NewTopic` describes the topic you want to create. The three constructor parameters are documented in detail in the [NewTopic Parameters](#newtopic-parameters) section below.
+  </Step>
+  <Step title="Submit and wait">
+    ```java
+    admin.createTopics(
+            Collections.singleton(topic)
+    ).all().get();
+    ```
+
+    `createTopics()` accepts a `Collection<NewTopic>`, so `Collections.singleton(topic)` wraps the single topic in a set. `.all()` returns a `KafkaFuture<Void>` that resolves when **all** submitted topics have been successfully created on the broker. `.get()` blocks the calling thread until that future completes, converting the asynchronous operation into a synchronous one.
+  </Step>
+</Steps>
+
+### NewTopic Parameters
+
+<ParamField path="name" type="String" required>
+  The name of the topic to create. Here `"products"`. Topic names may contain letters, numbers, dots, underscores, and hyphens.
+</ParamField>
+
+<ParamField path="numPartitions" type="int" required>
+  The number of partitions for the topic. Set to `3`. More partitions increase parallelism — multiple consumer instances in the same consumer group can each be assigned one or more partitions and process messages concurrently.
+</ParamField>
+
+<ParamField path="replicationFactor" type="short" required>
+  The number of broker replicas for each partition. Set to `(short) 3`. A replication factor of 3 means each partition has one leader and two followers, so the topic can survive the loss of two brokers without data loss. **Confluent Cloud clusters satisfy this requirement by default.**
+</ParamField>
+
+<Warning>
+  A replication factor of `3` requires at least **3 brokers** in the cluster. If you run a local single-broker Kafka instance (e.g. via Docker with one broker), the `createTopics` call will throw an `InvalidReplicationFactorException`. Lower the replication factor to `1` for local development.
+</Warning>
+
+### Expected Output
+
+```
+Connected to Kafka
+Topic 'orders' created successfully!
+```
+
+<Info>
+  The success message says `"Topic 'orders' created successfully!"` — this is a minor logging inconsistency in the source code. The topic that is actually created is `products` (as declared in the `NewTopic` constructor). The broker operation is correct; only the console message is mislabelled.
+</Info>
+
+---
+
+## KafkaTopicDeleter
+
+`KafkaTopicDeleter` connects to the broker and issues a delete request for the `products` topic, blocking until the broker confirms the deletion is complete.
+
+### Source Code
+
+```java
+package com.example.kafka.admin;
+
+import org.apache.kafka.clients.admin.Admin;
+
+import java.util.Collections;
+import java.util.Properties;
+
+import com.example.kafka.connections.KafkaConnection;
+
+public class KafkaTopicDeleter {
+
+    public static void main(String[] args) {
+
+        Properties props = KafkaConnection.getProperties();
+
+        try (Admin admin = Admin.create(props)) {
+
+            System.out.println("Connected to Kafka");
+
+            admin.deleteTopics(Collections.singleton("products"))
+                    .all()
+                    .get();
+
+            System.out.println("Topic 'products' deleted successfully!");
+
+        } catch (Exception e) {
+            System.out.println("Failed to delete topic");
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+### How It Works
+
+<Steps>
+  <Step title="Load connection properties and create Admin client">
+    Identical to `KafkaTopicCreator` — `KafkaConnection.getProperties()` loads credentials and `Admin.create(props)` opens the connection inside a try-with-resources block.
+  </Step>
+  <Step title="Delete the topic">
+    ```java
+    admin.deleteTopics(Collections.singleton("products"))
+            .all()
+            .get();
+    ```
+
+    `deleteTopics()` accepts a `Collection<String>` of topic names (not `NewTopic` objects). `Collections.singleton("products")` wraps the single name. `.all().get()` follows the same pattern as `createTopics`: `.all()` returns a `KafkaFuture<Void>` representing the completion of all deletions, and `.get()` blocks until it resolves.
+  </Step>
+</Steps>
+
+<Warning>
+  **Deleting a topic permanently destroys all messages it contains.** Kafka does not provide a recycle-bin or undo mechanism. Once `deleteTopics().all().get()` completes, every message in every partition of `products` is gone. Do not run `KafkaTopicDeleter` against a topic that holds data you need.
+</Warning>
+
+### Expected Output
+
+```
+Connected to Kafka
+Topic 'products' deleted successfully!
+```
+
+---
+
+## Admin API Patterns
+
+Both classes follow the same structural pattern for all Admin operations:
+
+<CardGroup cols={2}>
+  <Card title="Synchronous blocking with .get()" icon="clock">
+    Every Admin operation returns a result object (e.g. `CreateTopicsResult`, `DeleteTopicsResult`). Calling `.all().get()` on it blocks the thread until the broker confirms completion, turning async Kafka futures into straightforward sequential code.
+  </Card>
+  <Card title="try-with-resources for Admin" icon="shield-check">
+    Wrapping `Admin.create(props)` in a `try (Admin admin = ...)` block guarantees `admin.close()` is always called, releasing network connections and internal threads even when an exception is thrown.
+  </Card>
+  <Card title="Collections.singleton / singletonList" icon="layer-group">
+    Both `createTopics()` and `deleteTopics()` accept collections, supporting batch operations. The classes use `Collections.singleton()` to pass a single-element immutable set — concise and allocation-efficient for one-off operations.
+  </Card>
+  <Card title="Shared KafkaConnection helper" icon="plug">
+    Neither class hard-codes credentials. All connection configuration flows through `KafkaConnection.getProperties()`, so rotating an API key requires only a `.env` update — not a recompile.
+  </Card>
+</CardGroup>
+
+---
+
+## Running the Classes
+
+### Create the `products` topic
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.admin.KafkaTopicCreator
+```
+
+### Delete the `products` topic
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.admin.KafkaTopicDeleter
+```
+
+<Tip>
+  Topics only need to be created once. If you run `KafkaTopicCreator` a second time against a topic that already exists, the Admin API throws a `TopicExistsException` and the catch block prints `"Failed to create topic"`. This is expected behaviour — Kafka does not silently skip the creation. Use `KafkaConnectionTest`'s topic listing output to verify whether a topic already exists before attempting to create it.
+</Tip>
+
+---
+
+## Error Reference
+
+<Accordion title="TopicExistsException — topic already exists">
+  Thrown by `createTopics().all().get()` if the named topic already exists on the broker. Kafka does not offer an idempotent "create-if-absent" call in the basic Admin API. Either delete the topic first with `KafkaTopicDeleter` or verify its existence with `admin.listTopics().names().get()` before calling `createTopics`.
+</Accordion>
+
+<Accordion title="InvalidReplicationFactorException — not enough brokers">
+  Thrown when the requested replication factor exceeds the number of available brokers. In a single-broker local Kafka setup, change `(short) 3` to `(short) 1` in the `NewTopic` constructor. Confluent Cloud always provides at least three brokers, so this exception will not occur there.
+</Accordion>
+
+<Accordion title="UnknownTopicOrPartitionException — topic does not exist on delete">
+  Thrown by `deleteTopics().all().get()` if the named topic does not exist. This typically means the topic was already deleted or was never created. Re-run `KafkaTopicCreator` to recreate it if needed.
+</Accordion>
+
+<Accordion title="AuthorizationException — insufficient ACL permissions">
+  Thrown when the API key in use does not have `CREATE` (for `createTopics`) or `DELETE` (for `deleteTopics`) ACL permissions on the topic. Grant the appropriate permissions via the Confluent Cloud Access Control settings for your API key.
+</Accordion>

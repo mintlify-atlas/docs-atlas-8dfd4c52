@@ -1,0 +1,201 @@
+---
+title: "Test Kafka broker connectivity with the Admin API"
+sidebarTitle: "Connection Test"
+description: "KafkaConnectionTest uses the Kafka Admin API to list broker topics, verifying that your SASL_SSL credentials and bootstrap server are correctly configured."
+---
+
+Before sending a single message to Kafka, it is worth confirming that your environment variables are loaded correctly, your SASL credentials are valid, and your bootstrap server is reachable. `KafkaConnectionTest` is a lightweight smoke-test class that creates a Kafka Admin client, issues a `listTopics()` call against the broker, and prints numbered progress checkpoints to the console — making it immediately obvious at which step a failure occurred.
+
+## Source Code
+
+```java
+package com.example.kafka.admin;
+
+import org.apache.kafka.clients.admin.Admin;
+
+import java.util.Properties;
+
+import com.example.kafka.connections.KafkaConnection;
+
+public class KafkaConnectionTest {
+
+    public static void main(String[] args) {
+
+        System.out.println("1. Starting application...");
+
+        Properties props = KafkaConnection.getProperties();
+
+        System.out.println("2. Properties created...");
+
+        try (Admin admin = Admin.create(props)) {
+
+            System.out.println("3. Kafka Admin client created...");
+
+            System.out.println("4. Asking Kafka for topics...");
+
+            admin.listTopics()
+                    .names()
+                    .get();
+            System.out.println("5. Topics found:" + admin.listTopics().names().get());
+            System.out.println("5. Successfully connected to Kafka!");
+
+        } catch (Exception e) {
+
+            System.out.println("6. Failed to connect to Kafka");
+
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+## How It Works
+
+The test relies on two collaborating classes: `KafkaConnection`, which loads credentials from a `.env` file and builds a `Properties` object, and the Kafka `Admin` client, which communicates with the broker.
+
+### Step-by-step walkthrough
+
+<Steps>
+  <Step title="Step 1 — Application starts">
+    The JVM enters `main()`. The first `println` confirms the process started and Maven resolved the classpath correctly.
+  </Step>
+  <Step title="Step 2 — Properties created">
+    `KafkaConnection.getProperties()` is called. It uses **dotenv-java** to read `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_API_KEY`, and `KAFKA_API_SECRET` from your `.env` file, then assembles a `Properties` object configured for `SASL_SSL` / `PLAIN` authentication:
+
+    ```java
+    Properties props = KafkaConnection.getProperties();
+    ```
+
+    Printing this checkpoint means the `.env` file was found and all three required variables were present. If any variable is missing, dotenv throws before this line completes.
+  </Step>
+  <Step title="Step 3 — Admin client created">
+    ```java
+    try (Admin admin = Admin.create(props)) {
+    ```
+
+    `Admin.create(props)` instantiates the Admin client and opens a connection to the bootstrap broker. The try-with-resources block guarantees `admin.close()` is called whether the subsequent operations succeed or throw — so you will never leak connections. Reaching step 3 in the output means the TLS handshake and SASL authentication both succeeded.
+  </Step>
+  <Step title="Step 4 — Topic listing requested">
+    ```java
+    System.out.println("4. Asking Kafka for topics...");
+    ```
+
+    The log line is printed immediately before the network call, so if the process hangs you know exactly where it stalled.
+  </Step>
+  <Step title="Step 5 — Topics received (success path)">
+    ```java
+    admin.listTopics()
+            .names()
+            .get();
+    System.out.println("5. Topics found:" + admin.listTopics().names().get());
+    System.out.println("5. Successfully connected to Kafka!");
+    ```
+
+    `admin.listTopics()` returns a `ListTopicsResult`. Calling `.names()` on it yields a `KafkaFuture<Set<String>>`, and `.get()` blocks the calling thread until the broker responds with the complete set of topic names. A successful response confirms end-to-end connectivity: DNS resolution, TCP, TLS, SASL authentication, and broker authorisation are all working. The topic names are printed to the console so you can visually verify the expected topics exist.
+  </Step>
+  <Step title="Step 6 — Connection failed (failure path)">
+    ```java
+    System.out.println("6. Failed to connect to Kafka");
+    e.printStackTrace();
+    ```
+
+    Any exception thrown inside the try block is caught here. `e.printStackTrace()` dumps the full exception chain, which typically includes the root cause (e.g., `SaslAuthenticationException`, `TimeoutException`, or an SSL error) that points to the misconfigured setting.
+  </Step>
+</Steps>
+
+## Key API Concepts
+
+<Accordion title="Admin.create(props) and try-with-resources">
+  `Admin.create(props)` is the primary factory method for the Kafka Admin client. It accepts the same `Properties` object used by producers and consumers, including `bootstrap.servers` and security settings. Because `Admin` implements `AutoCloseable`, wrapping it in a `try (Admin admin = ...)` block ensures `admin.close()` is always called — even if an exception is thrown — releasing the underlying network connections and threads immediately.
+</Accordion>
+
+<Accordion title="admin.listTopics().names().get()">
+  The `listTopics()` call follows Kafka's asynchronous result pattern:
+
+  | Method | Return type | Purpose |
+  |---|---|---|
+  | `admin.listTopics()` | `ListTopicsResult` | Initiates the metadata request to the broker |
+  | `.names()` | `KafkaFuture<Set<String>>` | Extracts only the topic name strings from the result |
+  | `.get()` | `Set<String>` | Blocks until the broker responds, then returns the names |
+
+  The `.get()` call converts the asynchronous future into a synchronous result. If the broker is unreachable or authentication fails, `.get()` re-throws the underlying exception wrapped in an `ExecutionException`, which the catch block handles.
+</Accordion>
+
+## Running the Test
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.admin.KafkaConnectionTest
+```
+
+### Expected output — success
+
+```
+1. Starting application...
+2. Properties created...
+3. Kafka Admin client created...
+4. Asking Kafka for topics...
+5. Topics found:[orders, payments, payments-avro, products]
+5. Successfully connected to Kafka!
+```
+
+### Expected output — failure
+
+When the broker cannot be reached or credentials are wrong, the process stalls briefly at step 4 while the client retries, then times out:
+
+```
+1. Starting application...
+2. Properties created...
+3. Kafka Admin client created...
+4. Asking Kafka for topics...
+6. Failed to connect to Kafka
+org.apache.kafka.common.errors.TimeoutException: Timed out waiting for a node assignment...
+    at org.apache.kafka.clients.admin.KafkaAdminClient...
+```
+
+Authentication errors produce a more specific exception:
+
+```
+6. Failed to connect to Kafka
+org.apache.kafka.common.errors.SaslAuthenticationException: Authentication failed ...
+```
+
+<Tabs>
+  <Tab title="Missing .env file">
+    ```
+    1. Starting application...
+    Exception in thread "main" io.github.cdimascio.dotenv.DotenvException: .env not found
+    ```
+
+    Create a `.env` file in the project root with the three required variables.
+  </Tab>
+  <Tab title="Wrong bootstrap server">
+    The process reaches step 4 and then hangs for the client's `request.timeout.ms` (default 30 s) before printing step 6 with a `TimeoutException`.
+  </Tab>
+  <Tab title="Invalid API key or secret">
+    The process reaches step 4 quickly, then immediately prints step 6 with a `SaslAuthenticationException` because the broker rejects the credentials during the SASL handshake.
+  </Tab>
+</Tabs>
+
+<Tip>
+  Run `KafkaConnectionTest` as the very first thing whenever you update your `.env` credentials or change the bootstrap server address. Confirming connectivity here saves time debugging producers and consumers that depend on the same connection properties — a successful step 5 guarantees that all downstream classes will be able to reach the broker.
+</Tip>
+
+## Connection Properties Reference
+
+The `KafkaConnection.getProperties()` helper populates the following keys, all of which apply equally to the Admin client, producers, and consumers:
+
+<ParamField path="bootstrap.servers" type="string" required>
+  The `host:port` of your Confluent Cloud bootstrap server. Loaded from `KAFKA_BOOTSTRAP_SERVERS` in `.env`.
+</ParamField>
+
+<ParamField path="security.protocol" type="string" required>
+  Must be `SASL_SSL` for Confluent Cloud. Enables TLS transport encryption and SASL-based authentication.
+</ParamField>
+
+<ParamField path="sasl.mechanism" type="string" required>
+  Set to `PLAIN`. Confluent Cloud uses API key / secret pairs passed as PLAIN SASL credentials.
+</ParamField>
+
+<ParamField path="sasl.jaas.config" type="string" required>
+  The full JAAS login module string embedding your `KAFKA_API_KEY` and `KAFKA_API_SECRET`. Constructed dynamically by `KafkaConnection.getProperties()`.
+</ParamField>

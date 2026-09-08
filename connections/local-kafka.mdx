@@ -1,0 +1,185 @@
+---
+title: "Connect to a local Kafka broker for development"
+sidebarTitle: "Local Kafka"
+description: "Use KafkaLocalConnection to connect to a local Kafka broker at localhost:9092 with no authentication — ideal for local development and testing."
+---
+
+`KafkaLocalConnection` is a deliberately minimal connection helper designed for inner-loop development. It creates a `Properties` object with a single entry — `bootstrap.servers` pointing to `localhost:9092` — and nothing else. There are no API keys, no TLS handshake, and no calls to dotenv-java, so it works instantly without any credential setup. Use it when you want to iterate quickly against a locally running Kafka broker and switch back to `KafkaConnection` only when you are ready to test against Confluent Cloud.
+
+## `KafkaLocalConnection` source
+
+The class uses the typed constant `CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG` rather than the raw string `"bootstrap.servers"`, which is the idiomatic approach in the Kafka Java client library and makes the code refactor-safe.
+
+```java
+package com.example.kafka.connections;
+
+import org.apache.kafka.clients.CommonClientConfigs;
+
+import java.util.Properties;
+
+public class KafkaLocalConnection {
+
+    public static Properties getProperties() {
+
+        Properties props = new Properties();
+
+        props.put(
+                CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG,
+                "localhost:9092"
+        );
+
+        return props;
+    }
+}
+```
+
+`CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG` resolves to the string `"bootstrap.servers"` at runtime — the properties key is identical to the one set by `KafkaConnection`.
+
+## Local vs. Confluent Cloud
+
+<CardGroup cols={2}>
+  <Card title="KafkaLocalConnection" icon="laptop">
+    **Use for:** Local development, unit tests, offline work, quick experiments.
+
+    - No credentials required
+    - No `.env` file needed
+    - Zero network latency
+    - Data is ephemeral (lost when the broker restarts)
+    - Connects to `localhost:9092` only
+  </Card>
+  <Card title="KafkaConnection" icon="cloud">
+    **Use for:** Integration testing, staging, and production workloads on Confluent Cloud.
+
+    - Requires `KAFKA_API_KEY` and `KAFKA_API_SECRET`
+    - Reads credentials from `.env` via dotenv-java
+    - Enforces `SASL_SSL` + `PLAIN` authentication
+    - Persistent, replicated, managed Kafka service
+    - Supports Schema Registry integration
+  </Card>
+</CardGroup>
+
+<Info>
+  Both classes return a plain `Properties` object with the same key names, so you can swap one for the other without changing any producer or consumer code — only the import and the call site change.
+</Info>
+
+## Starting a local Kafka broker
+
+Before `KafkaLocalConnection` can connect, you need a Kafka broker listening on `localhost:9092`. There are two common ways to get one running quickly.
+
+<Tabs>
+  <Tab title="Docker (recommended)">
+    The project ships with a `Dockerfile`, and Docker Compose is the fastest way to spin up a single-node Kafka cluster locally. A minimal `docker-compose.yml` using the Confluent Platform images or the official Apache Kafka image will expose port `9092` on your machine.
+
+    ```bash
+    # Start the broker (adjust to your compose file)
+    docker compose up -d kafka
+
+    # Verify it is listening
+    docker compose ps
+    ```
+
+    <Tip>
+      The project's `Dockerfile` contains the build definition for the application image itself. Use a separate `docker-compose.yml` (or the KRaft single-node image) to run the broker during development.
+    </Tip>
+  </Tab>
+  <Tab title="kafka-server-start.sh">
+    If you have downloaded the Apache Kafka binary distribution, you can start a broker directly:
+
+    ```bash
+    # KRaft mode (Kafka 3.x+) — no ZooKeeper required
+    bin/kafka-server-start.sh config/kraft/server.properties
+    ```
+
+    By default, `server.properties` configures a listener on `PLAINTEXT://localhost:9092`, which matches exactly what `KafkaLocalConnection` targets.
+  </Tab>
+</Tabs>
+
+## `LocalProducer` — the reference implementation
+
+`LocalProducer` is the simplest end-to-end producer in the project and the canonical example of how to use `KafkaLocalConnection`. It fetches the base properties, adds `StringSerializer` for both key and value, creates a `KafkaProducer`, publishes a single record to the `payments` topic, and exits cleanly via try-with-resources.
+
+```java
+package com.example.kafka.producer;
+import java.util.Properties;
+
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import com.example.kafka.connections.KafkaLocalConnection;
+
+public class LocalProducer {
+
+    public static void main(String args[]){
+
+        Properties props = KafkaLocalConnection.getProperties();
+        String topicName = "payments";
+        String key = "key1";
+        String value = "value1";
+
+        props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+
+        try(KafkaProducer<String, String> producer = new KafkaProducer<>(props)){
+
+            System.out.println("Kafka Producer created.");
+
+            // Create Kafka record
+            ProducerRecord<String, String> record = new ProducerRecord<>(topicName, key, value);
+
+            // Send
+            producer.send(record).get();
+
+            System.out.println("Record sent successfully!");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+    }
+}
+```
+
+### Key points in `LocalProducer`
+
+<Accordion title="Why call .get() on the Future?">
+  `producer.send(record)` returns a `Future<RecordMetadata>`. Calling `.get()` on it blocks until the broker acknowledges the record, turning the async send into a synchronous one. This is appropriate in a demo — in production code you would typically pass a callback or work with the `Future` asynchronously to avoid blocking the calling thread.
+</Accordion>
+
+<Accordion title="Why try-with-resources?">
+  `KafkaProducer` implements `Closeable`. Wrapping it in a try-with-resources block ensures `producer.close()` is called even if an exception is thrown, which flushes any buffered records and releases network connections cleanly.
+</Accordion>
+
+<Accordion title="The payments topic">
+  The topic `payments` must exist on the broker before the record can be sent — or the broker must have `auto.create.topics.enable=true` (the default in most local configurations). For production-grade topic management, see the admin utilities in this project.
+</Accordion>
+
+## Swapping `KafkaConnection` for `KafkaLocalConnection`
+
+Because both helpers return the same `Properties` type with the same key names, the swap is a one-line change at the call site:
+
+<Tabs>
+  <Tab title="Before (Confluent Cloud)">
+    ```java
+    import com.example.kafka.connections.KafkaConnection;
+
+    // ...
+
+    Properties props = KafkaConnection.getProperties();
+    ```
+  </Tab>
+  <Tab title="After (local broker)">
+    ```java
+    import com.example.kafka.connections.KafkaLocalConnection;
+
+    // ...
+
+    Properties props = KafkaLocalConnection.getProperties();
+    ```
+  </Tab>
+</Tabs>
+
+No other changes are needed. The serializers, topic names, and all other producer/consumer configuration remain exactly the same.
+
+<Note>
+  `KafkaLocalConnection` does not support Schema Registry serialization because it sets no Schema Registry properties. If you need Avro or JSON Schema serialization locally, run a local Schema Registry instance (available as part of the Confluent Platform Docker images) and configure `RegistryConnection` to point to it.
+</Note>

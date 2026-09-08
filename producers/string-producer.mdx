@@ -1,0 +1,255 @@
+---
+title: "Produce plain string messages to Kafka topics"
+sidebarTitle: "String Producer"
+description: "Send raw string and JSON messages to Kafka using StringSerializer. Covers both Confluent Cloud and local broker variants with synchronous send acknowledgement."
+---
+
+Sending plain string messages is the simplest way to start producing to Kafka. This project includes two complementary implementations: `Producer` targets a Confluent Cloud cluster over SASL_SSL and sends a raw JSON payload to the `orders` topic, while `LocalProducer` connects to a broker running on `localhost:9092` with no authentication and sends a plain string to the `payments` topic. Both classes use `StringSerializer` for keys and values, construct a `ProducerRecord`, and block on `.get()` to confirm Kafka has acknowledged the write before the JVM exits.
+
+## How StringSerializer Works
+
+`org.apache.kafka.common.serialization.StringSerializer` converts a Java `String` to a raw UTF-8 byte array. Kafka treats messages as opaque bytes on the wire; the serializer is the bridge between your Java type and those bytes. Because both the key and the value in these producers are plain strings, the same serializer class is registered for both `key.serializer` and `value.serializer`.
+
+```properties
+key.serializer=org.apache.kafka.common.serialization.StringSerializer
+value.serializer=org.apache.kafka.common.serialization.StringSerializer
+```
+
+When a consumer reads the message, it uses a matching `StringDeserializer` to convert the bytes back to a `String`.
+
+## Cloud vs. Local at a Glance
+
+<Tabs>
+  <Tab title="Confluent Cloud (Producer.java)">
+    `Producer` connects to Confluent Cloud using credentials loaded from a `.env` file via `KafkaConnection.getProperties()`. The connection is secured with `SASL_SSL` using the `PLAIN` mechanism and API key/secret pairs.
+
+    **Connection properties set by `KafkaConnection`:**
+    ```properties
+    bootstrap.servers=<KAFKA_BOOTSTRAP_SERVERS from .env>
+    security.protocol=SASL_SSL
+    sasl.mechanism=PLAIN
+    sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="<KAFKA_API_KEY>" \
+      password="<KAFKA_API_SECRET>";
+    ```
+
+    The payload sent to the `orders` topic is a raw JSON string:
+
+    ```json
+    {
+        "customer_id": "C1001",
+        "amount": 5000,
+        "currency": "INR",
+        "event_type": "PAYMENT"
+    }
+    ```
+
+    **Full source — `Producer.java`:**
+
+    ```java
+    package com.example.kafka.producer;
+
+    import org.apache.kafka.clients.producer.KafkaProducer;
+    import org.apache.kafka.clients.producer.ProducerRecord;
+
+    import java.util.Properties;
+
+    import com.example.kafka.connections.KafkaConnection;
+
+    public class Producer {
+
+        public static void main(String[] args) {
+
+            Properties props = KafkaConnection.getProperties();
+
+            // Serializer for the key
+            props.put(
+                    "key.serializer",
+                    "org.apache.kafka.common.serialization.StringSerializer"
+            );
+
+            // Serializer for the value
+            props.put(
+                    "value.serializer",
+                    "org.apache.kafka.common.serialization.StringSerializer"
+            );
+
+            try (KafkaProducer<String, String> producer =
+                         new KafkaProducer<>(props)) {
+
+                String paymentEvent = """
+                        {
+                            "customer_id": "C1001",
+                            "amount": 5000,
+                            "currency": "INR",
+                            "event_type": "PAYMENT"
+                        }
+                        """;
+
+                ProducerRecord<String, String> record =
+                        new ProducerRecord<>(
+                                "orders",
+                                "C1001",
+                                paymentEvent
+                        );
+
+                // Wait for Kafka to acknowledge the event
+                producer.send(record).get();
+
+                System.out.println("Payment event successfully sent!");
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Local Broker (LocalProducer.java)">
+    `LocalProducer` connects to `localhost:9092` with no authentication — ideal for a locally running Kafka broker or Docker-based setup. `KafkaLocalConnection.getProperties()` sets only `bootstrap.servers`.
+
+    **Connection properties set by `KafkaLocalConnection`:**
+    ```properties
+    bootstrap.servers=localhost:9092
+    ```
+
+    No `security.protocol`, `sasl.mechanism`, or credentials are needed. The message sent to the `payments` topic is a plain string `"value1"` keyed by `"key1"`.
+
+    **Full source — `LocalProducer.java`:**
+
+    ```java
+    package com.example.kafka.producer;
+
+    import java.util.Properties;
+
+    import org.apache.kafka.clients.producer.KafkaProducer;
+    import org.apache.kafka.clients.producer.ProducerRecord;
+
+    import com.example.kafka.connections.KafkaLocalConnection;
+
+    public class LocalProducer {
+
+        public static void main(String args[]) {
+
+            Properties props = KafkaLocalConnection.getProperties();
+            String topicName = "payments";
+            String key = "key1";
+            String value = "value1";
+
+            props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+            props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+
+            try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+
+                System.out.println("Kafka Producer created.");
+
+                // Create Kafka record
+                ProducerRecord<String, String> record = new ProducerRecord<>(topicName, key, value);
+
+                // Send
+                producer.send(record).get();
+
+                System.out.println("Record sent successfully!");
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## ProducerRecord Anatomy
+
+A `ProducerRecord<String, String>` bundles three things together before being handed to the producer:
+
+```java
+ProducerRecord<String, String> record =
+    new ProducerRecord<>(
+        "orders",   // topic  — destination topic name
+        "C1001",    // key    — used to determine partition assignment
+        paymentEvent // value — the actual message bytes after serialization
+    );
+```
+
+<CardGroup cols={3}>
+  <Card title="Topic" icon="layer-group">
+    The name of the Kafka topic this record will be written to. Must already exist or auto-creation must be enabled on the broker.
+  </Card>
+  <Card title="Key" icon="key">
+    An optional string key. Kafka hashes the key to select a partition, guaranteeing that all records with the same key land in the same partition (and thus arrive in order for a consumer).
+  </Card>
+  <Card title="Value" icon="file-code">
+    The message payload. Here it is a raw JSON string serialized to UTF-8 bytes by `StringSerializer`.
+  </Card>
+</CardGroup>
+
+## Synchronous Send with `.get()`
+
+`producer.send(record)` is inherently asynchronous — it returns a `Future<RecordMetadata>`. Calling `.get()` on that Future blocks the current thread until the broker acknowledges the write (or an exception is thrown).
+
+```java
+// Blocks until the broker confirms the record was written
+producer.send(record).get();
+```
+
+<Accordion title="Why use .get() instead of a callback?">
+  Synchronous sends are the simplest way to confirm delivery in a learning context — they make error propagation obvious and eliminate concurrency concerns. In production, prefer the async callback form (`producer.send(record, (metadata, ex) -> { ... })`) combined with `producer.flush()` so that sending and network I/O can overlap, dramatically improving throughput.
+</Accordion>
+
+<Warning>
+  Calling `.get()` on every record eliminates batching and severely limits throughput in high-volume scenarios. Use synchronous sends only for testing, low-frequency events, or when strict ordering guarantees are required.
+</Warning>
+
+## Key Differences Between the Two Producers
+
+| | `Producer` (Cloud) | `LocalProducer` |
+|---|---|---|
+| **Broker** | Confluent Cloud | `localhost:9092` |
+| **Security** | `SASL_SSL` + PLAIN API keys | None |
+| **Topic** | `orders` | `payments` |
+| **Message** | JSON payment event string | Plain `"value1"` |
+| **Config source** | `.env` via dotenv-java | Hard-coded |
+
+## Running the Producers
+
+<Tabs>
+  <Tab title="Cloud Producer">
+    Ensure your `.env` file in the project root contains valid Confluent Cloud credentials:
+
+    ```properties
+    KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.region.provider.confluent.cloud:9092
+    KAFKA_API_KEY=your_api_key
+    KAFKA_API_SECRET=your_api_secret
+    ```
+
+    Then run:
+
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.producer.Producer
+    ```
+
+    Expected output:
+    ```
+    Payment event successfully sent!
+    ```
+  </Tab>
+  <Tab title="Local Producer">
+    Start a local Kafka broker (e.g., via Docker Compose), then run:
+
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.producer.LocalProducer
+    ```
+
+    Expected output:
+    ```
+    Kafka Producer created.
+    Record sent successfully!
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  To verify a message arrived, open a console consumer against the target topic. For the local broker: `kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payments --from-beginning`. For Confluent Cloud, use the Confluent CLI or the Cloud console's topic viewer.
+</Tip>

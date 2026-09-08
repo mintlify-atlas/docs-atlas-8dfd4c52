@@ -1,72 +1,83 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Kafka Learning",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#1D3557",
+    "light": "#457B9D",
+    "dark": "#0A1628"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/Mithrajeeth/kafka-learning"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/Mithrajeeth/kafka-learning"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Connections",
+            "pages": [
+              "connections/confluent-cloud",
+              "connections/local-kafka",
+              "connections/schema-registry"
+            ]
+          },
+          {
+            "group": "Producers",
+            "pages": [
+              "producers/string-producer",
+              "producers/schema-producer",
+              "producers/avro-producer",
+              "producers/dynamic-producer"
+            ]
+          },
+          {
+            "group": "Consumers",
+            "pages": [
+              "consumers/string-consumer",
+              "consumers/schema-consumer"
+            ]
+          },
+          {
+            "group": "Topic Administration",
+            "pages": [
+              "admin/connection-test",
+              "admin/topic-management"
+            ]
+          },
+          {
+            "group": "Schema & Serialization",
+            "pages": [
+              "schema/avro-schema",
+              "schema/json-schema",
+              "schema/dynamic-inference"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/configuration"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

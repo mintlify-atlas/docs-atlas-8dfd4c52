@@ -1,0 +1,194 @@
+---
+title: "Define and generate Avro schemas for Kafka messages"
+sidebarTitle: "Avro Schema"
+description: "Define the PaymentAvro record in an .avsc file and auto-generate a Java POJO using the Maven Avro plugin. Covers field types and the builder pattern."
+---
+
+Apache Avro is a compact, binary serialization format that pairs naturally with Apache Kafka. Unlike plain JSON, Avro encodes data without field names on the wire, relying on a shared schema to shrink message sizes dramatically. When combined with Confluent Schema Registry, every producer registers its schema once and embeds only a 5-byte schema ID in each message header — consumers fetch the schema on first receipt and deserialize without any out-of-band coordination. The result is type-safe, self-describing messaging with built-in support for schema evolution.
+
+## The `PaymentAvro` Schema
+
+The schema for this project lives at `src/main/avro/PaymentAvro.avsc`. It defines a `record` named `PaymentAvro` in the `com.example.kafka.events` namespace, with four required fields that capture a payment event.
+
+```json
+{
+  "type": "record",
+  "name": "PaymentAvro",
+  "namespace": "com.example.kafka.events",
+  "fields": [
+    { "name": "customerId", "type": "string" },
+    { "name": "amount",     "type": "long"   },
+    { "name": "currency",   "type": "string" },
+    { "name": "eventType",  "type": "string" }
+  ]
+}
+```
+
+<Note>
+All four fields are **required** (no `null` union). If you need an optional field, wrap its type in a nullable union: `["null", "string"]`. The [dynamic inference pipeline](/schema/dynamic-inference) uses exactly this pattern for fields that are absent from some samples.
+</Note>
+
+### Field Reference
+
+<ParamField path="customerId" type="string" required>
+  Unique identifier for the customer initiating the payment. Mapped to Java `String`.
+</ParamField>
+
+<ParamField path="amount" type="long" required>
+  Payment amount in the smallest currency unit (e.g. paise for INR, cents for USD). Mapped to Java `long` — use an integral value, never a floating-point one.
+</ParamField>
+
+<ParamField path="currency" type="string" required>
+  ISO 4217 currency code such as `"INR"` or `"USD"`. Mapped to Java `String`.
+</ParamField>
+
+<ParamField path="eventType" type="string" required>
+  Discriminator string for the event kind, e.g. `"PAYMENT"` or `"REFUND"`. Mapped to Java `String`.
+</ParamField>
+
+---
+
+## Code Generation with Maven
+
+The `.avsc` file is a declaration; the usable Java class is generated at build time by the `avro-maven-plugin`. Two Maven plugins work together to make the generated class visible to both the compiler and your IDE.
+
+### `avro-maven-plugin`
+
+Bound to the `generate-sources` lifecycle phase, this plugin reads every `.avsc` file under `src/main/avro/` and emits a corresponding Java class into `target/generated-sources/avro/`.
+
+```xml
+<plugin>
+    <groupId>org.apache.avro</groupId>
+    <artifactId>avro-maven-plugin</artifactId>
+    <version>1.12.1</version>
+    <executions>
+        <execution>
+            <phase>generate-sources</phase>
+            <goals>
+                <goal>schema</goal>
+            </goals>
+            <configuration>
+                <sourceDirectory>${project.basedir}/src/main/avro</sourceDirectory>
+                <outputDirectory>${project.basedir}/target/generated-sources/avro</outputDirectory>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+### `build-helper-maven-plugin`
+
+After generation, `target/generated-sources/avro` must be declared as a source root so that Maven's compiler and IDEs like VS Code's Java Language Server can resolve `PaymentAvro`.
+
+```xml
+<plugin>
+    <groupId>org.codehaus.mojo</groupId>
+    <artifactId>build-helper-maven-plugin</artifactId>
+    <version>3.5.0</version>
+    <executions>
+        <execution>
+            <id>add-source</id>
+            <phase>generate-sources</phase>
+            <goals>
+                <goal>add-source</goal>
+            </goals>
+            <configuration>
+                <sources>
+                    <source>${project.basedir}/target/generated-sources/avro</source>
+                </sources>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+<Note>
+`PaymentAvro.java` does **not** exist in `src/`. It only appears under `target/generated-sources/avro/` **after** you run `mvn generate-sources` (or any later phase such as `mvn compile`). If your IDE shows an unresolved symbol error, trigger a Maven build first.
+
+```bash
+mvn generate-sources
+```
+</Note>
+
+---
+
+## Using the Generated Class
+
+The Avro plugin generates a full-featured `PaymentAvro` class that implements `org.apache.avro.specific.SpecificRecord`. Avro exposes a fluent **builder** for safe construction — it validates required fields at `.build()` time rather than silently accepting nulls.
+
+```java
+PaymentAvro payment = PaymentAvro.newBuilder()
+        .setCustomerId("C1001")
+        .setAmount(5000L)
+        .setCurrency("INR")
+        .setEventType("PAYMENT")
+        .build();
+```
+
+<Tip>
+The builder enforces the schema at construction time. Omitting a required field — or passing a `null` where `string` or `long` is expected — throws an `org.apache.avro.AvroRuntimeException` before the record ever reaches a producer.
+</Tip>
+
+### Avro Primitive Types Cheat-Sheet
+
+<CardGroup cols={2}>
+  <Card title="string" icon="text">
+    Maps to Java `String` (or `CharSequence`). Used for `customerId`, `currency`, and `eventType` in the payment schema.
+  </Card>
+  <Card title="long" icon="hashtag">
+    64-bit signed integer. Maps to Java `long`. Used for `amount`. Always prefer `long` over `int` for monetary values.
+  </Card>
+  <Card title="double" icon="percent">
+    64-bit IEEE 754 float. Maps to Java `double`. Used by the dynamic inference engine for non-integral numbers from API responses.
+  </Card>
+  <Card title="boolean" icon="toggle-on">
+    Maps to Java `boolean`. Used by dynamic inference for JSON boolean fields.
+  </Card>
+</CardGroup>
+
+### Nullable Union Types
+
+When a field may be absent or explicitly `null`, Avro represents it as a **union** of `null` and the concrete type. The convention is to put `null` first so `null` can serve as the default:
+
+```json
+{ "name": "description", "type": ["null", "string"], "default": null }
+```
+
+The dynamic schema inference service produces exactly this pattern for any field that is missing from at least one sample record. See [Dynamic Inference](/schema/dynamic-inference) for the full algorithm.
+
+---
+
+## Maven Avro Dependency
+
+The core Avro runtime library is declared in `pom.xml`:
+
+```xml
+<!-- Apache Avro -->
+<dependency>
+    <groupId>org.apache.avro</groupId>
+    <artifactId>avro</artifactId>
+    <version>1.12.1</version>
+</dependency>
+
+<!-- Confluent Avro Serializer -->
+<dependency>
+    <groupId>io.confluent</groupId>
+    <artifactId>kafka-avro-serializer</artifactId>
+    <version>8.3.1</version>
+</dependency>
+```
+
+The Confluent serializer artifact is pulled from the Confluent Maven repository, which must be declared explicitly:
+
+```xml
+<repositories>
+    <repository>
+        <id>confluent</id>
+        <url>https://packages.confluent.io/maven/</url>
+    </repository>
+</repositories>
+```
+
+<Info>
+`kafka-avro-serializer` bundles `KafkaAvroSerializer` and `KafkaAvroDeserializer`, which handle Schema Registry registration, schema ID embedding, and Avro binary encoding/decoding automatically. You configure them via producer/consumer properties rather than calling them directly.
+</Info>

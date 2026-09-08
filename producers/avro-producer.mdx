@@ -1,0 +1,220 @@
+---
+title: "Produce Avro-serialized records using Schema Registry"
+sidebarTitle: "Avro Producer"
+description: "Send strongly-typed Avro records to Kafka using KafkaAvroSerializer. PaymentAvro is auto-generated from an .avsc schema file by the Maven Avro plugin."
+---
+
+`AvroProducer` demonstrates the full Avro serialization workflow: a `.avsc` schema definition file drives code generation at build time, producing a type-safe `PaymentAvro` Java class. At runtime, `KafkaAvroSerializer` serializes each record, registers the Avro schema with Confluent Schema Registry on the first send, and embeds the schema ID in every message's wire format. This approach gives you compile-time type safety, compact binary encoding, and Registry-enforced schema evolution — a significant step up from JSON for high-throughput pipelines.
+
+## The PaymentAvro Avro Schema
+
+The canonical definition of the `PaymentAvro` record lives in `src/main/avro/PaymentAvro.avsc`. This single file is the source of truth: the Maven Avro plugin reads it to generate the `PaymentAvro.java` class, and `KafkaAvroSerializer` registers it in Schema Registry at runtime.
+
+```json
+{
+  "type": "record",
+  "name": "PaymentAvro",
+  "namespace": "com.example.kafka.events",
+  "fields": [
+    { "name": "customerId", "type": "string" },
+    { "name": "amount",     "type": "long"   },
+    { "name": "currency",   "type": "string" },
+    { "name": "eventType",  "type": "string" }
+  ]
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="Record type" icon="rectangle-list">
+    `"type": "record"` declares this as an Avro named record — a fixed schema with typed fields, similar to a Java class or a database row.
+  </Card>
+  <Card title="Namespace" icon="folder-tree">
+    `"namespace": "com.example.kafka.events"` becomes the Java package of the generated class, placing `PaymentAvro.java` alongside the hand-written `PaymentEvent.java`.
+  </Card>
+  <Card title="Typed fields" icon="list-check">
+    `string` maps to `java.lang.String`; `long` maps to Java `long`. The generated class enforces these types at compile time, preventing type mismatches that would only surface at runtime with JSON.
+  </Card>
+  <Card title="Schema evolution" icon="code-branch">
+    Adding a field with a default value to the `.avsc` is a backward-compatible change — existing consumers that know the old schema can still read new records. The Registry tracks every version.
+  </Card>
+</CardGroup>
+
+## Generating the PaymentAvro Class
+
+The `avro-maven-plugin` bound to the `generate-sources` lifecycle phase reads every `.avsc` file under `src/main/avro/` and emits the corresponding Java classes into `target/generated-sources/avro/`.
+
+<Note>
+  You must run `mvn generate-sources` (or any goal that includes it, such as `mvn compile` or `mvn package`) before your IDE or compiler can resolve `PaymentAvro`. If you see "cannot find symbol: PaymentAvro", this step was skipped.
+</Note>
+
+```bash
+# Generate PaymentAvro.java from PaymentAvro.avsc
+mvn generate-sources
+```
+
+After generation, the class is available at:
+```
+target/generated-sources/avro/com/example/kafka/events/PaymentAvro.java
+```
+
+The generated class implements `org.apache.avro.specific.SpecificRecord` and exposes a fluent builder, individual setters, and the `getSchema()` static method used internally by `KafkaAvroSerializer`.
+
+## AvroProducer Source
+
+```java
+package com.example.kafka.producer;
+
+import com.example.kafka.events.PaymentAvro;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import com.example.kafka.connections.KafkaConnection;
+import com.example.kafka.connections.RegistryConnection;
+
+import java.util.Properties;
+
+public class AvroProducer {
+
+    public static void main(String[] args) throws Exception {
+
+        System.out.println("Starting Avro Producer...");
+
+        Properties props = KafkaConnection.getProperties();
+
+        props.put("key.serializer",   "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
+
+        // Adding schema registry properties into the producer properties
+        Properties schemaProps = RegistryConnection.getProperties();
+        props.putAll(schemaProps);
+
+        try (KafkaProducer<String, PaymentAvro> producer =
+                     new KafkaProducer<>(props)) {
+
+            System.out.println("Kafka Avro Producer created.");
+
+            // Create Avro object using generated class
+            PaymentAvro payment = PaymentAvro.newBuilder()
+                    .setCustomerId("C1001")
+                    .setAmount(5000)
+                    .setCurrency("INR")
+                    .setEventType("PAYMENT")
+                    .build();
+
+            System.out.println("Payment object created.");
+
+            // Create Kafka record
+            ProducerRecord<String, PaymentAvro> record =
+                    new ProducerRecord<>(
+                            "payments-avro",
+                            "C1001",
+                            payment
+                    );
+
+            // Send
+            producer.send(record).get();
+
+            System.out.println("Avro record sent successfully!");
+        }
+    }
+}
+```
+
+## The Builder Pattern
+
+Avro-generated classes expose a static `newBuilder()` factory that returns a type-safe fluent builder. Each setter corresponds to one field in the `.avsc` schema and returns the builder for chaining. `build()` validates that all required fields have been set and constructs the immutable `PaymentAvro` instance.
+
+```java
+PaymentAvro payment = PaymentAvro.newBuilder()
+        .setCustomerId("C1001")   // maps to "customerId": "string"
+        .setAmount(5000)           // maps to "amount": "long"
+        .setCurrency("INR")        // maps to "currency": "string"
+        .setEventType("PAYMENT")   // maps to "eventType": "string"
+        .build();
+```
+
+<Accordion title="Why use the builder instead of a constructor?">
+  Avro-generated classes do have an all-args constructor, but the builder is preferred because:
+  - Field names are explicit — you cannot accidentally swap `currency` and `eventType` as you can with positional arguments.
+  - Optional/nullable fields can be omitted cleanly.
+  - The builder validates required fields and throws `org.apache.avro.AvroMissingFieldException` if any non-nullable field is left unset, surfacing bugs before the record reaches the network.
+</Accordion>
+
+## How KafkaAvroSerializer Works
+
+<Steps>
+  <Step title="Extract the schema">
+    On the first call to `producer.send()`, `KafkaAvroSerializer` calls `PaymentAvro.getSchema()` on the `SpecificRecord` instance to obtain the Avro `Schema` object.
+  </Step>
+  <Step title="Register with Schema Registry">
+    The serializer POSTs the schema JSON to Confluent Schema Registry under the subject `payments-avro-value`. The Registry returns an integer schema ID. Subsequent calls with the same schema simply retrieve the cached ID.
+  </Step>
+  <Step title="Encode to binary">
+    The message is serialized to Avro binary format — a compact, schema-less byte sequence (fields are positional, not named). The wire format is:
+
+    ```
+    [ 0x00 | schema_id (4 bytes) | avro_binary_payload ]
+    ```
+  </Step>
+  <Step title="Broker acknowledgement">
+    `.get()` on the returned `Future<RecordMetadata>` blocks until the broker confirms the write. On success, the record is durably stored on the `payments-avro` topic.
+  </Step>
+</Steps>
+
+## Producer Configuration Summary
+
+| Property | Value |
+|---|---|
+| `bootstrap.servers` | Confluent Cloud broker (from `.env`) |
+| `security.protocol` | `SASL_SSL` |
+| `sasl.mechanism` | `PLAIN` |
+| `key.serializer` | `StringSerializer` |
+| `value.serializer` | `KafkaAvroSerializer` |
+| `schema.registry.url` | Confluent Schema Registry URL (from `.env`) |
+| `basic.auth.credentials.source` | `USER_INFO` |
+| `basic.auth.user.info` | `<SR_KEY>:<SR_SECRET>` |
+
+## Required `.env` Variables
+
+```properties
+# Confluent Cloud Kafka broker
+KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.region.provider.confluent.cloud:9092
+KAFKA_API_KEY=your_kafka_api_key
+KAFKA_API_SECRET=your_kafka_api_secret
+
+# Confluent Schema Registry
+SCHEMA_REGISTRY_URL=https://psrc-xxxxx.region.provider.confluent.cloud
+SCHEMA_REGISTRY_API_KEY=your_schema_registry_api_key
+SCHEMA_REGISTRY_API_SECRET=your_schema_registry_api_secret
+```
+
+## Running AvroProducer
+
+<Steps>
+  <Step title="Generate sources">
+    ```bash
+    mvn generate-sources
+    ```
+    This compiles `PaymentAvro.avsc` into `PaymentAvro.java`. Skip this if you have already run `mvn compile` or `mvn package`.
+  </Step>
+  <Step title="Run the producer">
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.producer.AvroProducer
+    ```
+  </Step>
+  <Step title="Verify the output">
+    ```
+    Starting Avro Producer...
+    Kafka Avro Producer created.
+    Payment object created.
+    Avro record sent successfully!
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  After a successful run, navigate to the `payments-avro-value` subject in the Confluent Schema Registry UI. You will see the exact Avro schema JSON that was registered, along with the schema ID that is now embedded in every message written to the `payments-avro` topic.
+</Tip>
+
+<Warning>
+  Avro binary messages are not human-readable in standard Kafka console tools. Use `kafka-avro-console-consumer` from the Confluent Platform distribution (with `--property schema.registry.url=...`) to deserialize and print Avro records to the terminal.
+</Warning>

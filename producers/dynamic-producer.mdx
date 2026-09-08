@@ -1,0 +1,342 @@
+---
+title: "Produce dynamic Avro records with runtime schema inference"
+sidebarTitle: "Dynamic Producer"
+description: "DynamicProductProducer fetches live product data from an API, infers an Avro schema from samples, and produces all records to the products topic using KafkaAvroSerializer."
+---
+
+`DynamicProductProducer` is the most sophisticated producer in this project and the entry point of the Docker image's fat JAR. Rather than working from a hand-written `.avsc` file, it fetches live product data from the public `dummyjson.com` API at runtime, analyzes a sample of the JSON to infer an Avro schema on the fly, and then produces every product record to the `products` Kafka topic using `KafkaAvroSerializer`. This pattern is useful when the shape of external data is not known ahead of time or can change between deployments — the schema is always derived from the actual data being produced.
+
+## Full Pipeline Overview
+
+The producer's `main` method follows five numbered steps that also appear in the console output, making it easy to trace execution:
+
+<Steps>
+  <Step title="Fetch products from the API">
+    `ApiFetchService.fetchProducts()` issues an HTTP GET to `https://dummyjson.com/products` using the Java 11 `HttpClient`. Jackson parses the JSON response and returns the `"products"` array node — a `JsonNode` containing one element per product. No POJO class is built; the data stays as a `JsonNode` tree throughout.
+
+    ```java
+    System.out.println("1. Fetching products from API...");
+    JsonNode products = ApiFetchService.fetchProducts();
+    ```
+  </Step>
+  <Step title="Build the sample set">
+    Up to 30 records are collected into a `List<JsonNode>`. Using a sample (rather than the entire dataset) keeps schema inference fast and avoids over-fitting the schema to rare fields that appear in only a few records.
+
+    ```java
+    System.out.println("2. Building sample set for schema inference...");
+    int sampleSize = Math.min(30, products.size());
+    List<JsonNode> samples = new ArrayList<>();
+    for (int i = 0; i < sampleSize; i++) {
+        samples.add(products.get(i));
+    }
+    ```
+  </Step>
+  <Step title="Infer the Avro schema">
+    `AvroSchemaService.inferSchemaFromSamples()` scans every field across all samples. Fields that appear in every sample become required; fields missing from at least one sample become nullable unions (`["null", actualType]`). Jackson node types (`STRING`, `NUMBER`, `BOOLEAN`, `OBJECT`, `ARRAY`) are mapped to Avro types. Nested objects recurse, and arrays of objects generate nested record schemas.
+
+    ```java
+    System.out.println("3. Inferring schema from " + sampleSize + " sample records...");
+    AvroSchemaService schemaService = new AvroSchemaService();
+    Schema schema = schemaService.inferSchemaFromSamples(samples, "Product", "com.example.kafka.avro");
+    System.out.println(schema.toString(true));
+    ```
+  </Step>
+  <Step title="Produce all records with async callbacks">
+    For every product node in the full dataset, `RecordMapper.map()` converts the `JsonNode` to a `GenericRecord` that conforms to the inferred schema. Each record is sent asynchronously with a callback that logs the partition and offset on success, or prints the exception on failure.
+
+    ```java
+    System.out.println("4. Producing records to topic 'products'...");
+    for (JsonNode productNode : products) {
+        GenericRecord record = mapper.map(productNode, schema);
+        String key = productNode.get("id").asText();
+
+        producer.send(new ProducerRecord<>("products", key, record), (metadata, exception) -> {
+            if (exception != null) {
+                System.out.println("FAILED id=" + key);
+                exception.printStackTrace();
+            } else {
+                System.out.println("Sent id=" + key + " -> partition=" + metadata.partition()
+                        + " offset=" + metadata.offset());
+            }
+        });
+    }
+    ```
+  </Step>
+  <Step title="Flush and finish">
+    `producer.flush()` blocks until all in-flight records have been acknowledged by the broker, ensuring no messages are lost when the `try` block closes the producer.
+
+    ```java
+    producer.flush();
+    System.out.println("5. Done.");
+    ```
+  </Step>
+</Steps>
+
+## Full DynamicProductProducer Source
+
+```java
+package com.example.kafka.producer;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericRecord;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import com.example.kafka.connections.KafkaConnection;
+import com.example.kafka.connections.RegistryConnection;
+import com.example.kafka.services.ApiFetchService;
+import com.example.kafka.services.AvroSchemaService;
+import com.example.kafka.services.RecordMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+
+public class DynamicProductProducer {
+
+    public static void main(String[] args) throws Exception {
+
+        System.out.println("1. Fetching products from API...");
+        JsonNode products = ApiFetchService.fetchProducts();
+
+        System.out.println("2. Building sample set for schema inference...");
+        int sampleSize = Math.min(30, products.size());
+        List<JsonNode> samples = new ArrayList<>();
+        for (int i = 0; i < sampleSize; i++) {
+            samples.add(products.get(i));
+        }
+
+        System.out.println("3. Inferring schema from " + sampleSize + " sample records...");
+        AvroSchemaService schemaService = new AvroSchemaService();
+        Schema schema = schemaService.inferSchemaFromSamples(samples, "Product", "com.example.kafka.avro");
+        System.out.println(schema.toString(true));
+
+        Properties props = KafkaConnection.getProperties();
+        props.putAll(RegistryConnection.getProperties());
+        props.put("key.serializer",   "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("value.serializer", "io.confluent.kafka.serializers.KafkaAvroSerializer");
+
+        RecordMapper mapper = new RecordMapper();
+
+        try (KafkaProducer<String, GenericRecord> producer = new KafkaProducer<>(props)) {
+
+            System.out.println("4. Producing records to topic 'products'...");
+
+            for (JsonNode productNode : products) {
+                GenericRecord record = mapper.map(productNode, schema);
+                String key = productNode.get("id").asText();
+
+                producer.send(new ProducerRecord<>("products", key, record), (metadata, exception) -> {
+                    if (exception != null) {
+                        System.out.println("FAILED id=" + key);
+                        exception.printStackTrace();
+                    } else {
+                        System.out.println("Sent id=" + key + " -> partition=" + metadata.partition()
+                                + " offset=" + metadata.offset());
+                    }
+                });
+            }
+
+            producer.flush();
+            System.out.println("5. Done.");
+        }
+    }
+}
+```
+
+## Supporting Services
+
+### ApiFetchService — HTTP fetch and JSON parsing
+
+`ApiFetchService` uses the Java 11 built-in `HttpClient` (no third-party HTTP library required). It sends a `GET` request to `https://dummyjson.com/products`, reads the response body as a `String`, parses it with Jackson's `ObjectMapper`, and returns only the `"products"` array node. The caller receives a `JsonNode` that can be iterated like a list.
+
+```java
+package com.example.kafka.services;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class ApiFetchService {
+    private final static HttpClient client = HttpClient.newHttpClient();
+    private final static ObjectMapper mapper = new ObjectMapper();
+
+    public static JsonNode fetchProducts() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://dummyjson.com/products"))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode root = mapper.readTree(response.body());
+        return root.get("products"); // returns the JSON array node — no POJO built
+    }
+}
+```
+
+<Note>
+  `root.get("products")` returns a `JsonNode` of type `ARRAY`. Iterating it with a for-each loop yields one `JsonNode` per product. No product POJO class is needed anywhere in the pipeline.
+</Note>
+
+### AvroSchemaService — Runtime schema inference
+
+`AvroSchemaService.inferSchemaFromSamples()` accepts a list of sample `JsonNode` records, a record name, and a namespace. It sweeps through every field in every sample, tracking which fields appear in all samples (required) versus some samples (optional/nullable). Jackson node types are mapped to Avro types using a switch expression:
+
+| Jackson NodeType | Integral? | Avro Type |
+|---|---|---|
+| `STRING` | — | `string` |
+| `NUMBER` | yes | `long` |
+| `NUMBER` | no | `double` |
+| `BOOLEAN` | — | `boolean` |
+| `NULL` | — | `["null", "string"]` |
+| `OBJECT` | — | Nested `record` (recursive) |
+| `ARRAY` of objects | — | `array` of nested `record` |
+| `ARRAY` of primitives | — | `array` of `string` |
+
+Optional fields are emitted as nullable union types `["null", T]` so that records missing that field are still valid under the schema.
+
+<Accordion title="How field optionality is determined">
+  The service computes a running intersection of field name sets across all samples:
+
+  ```java
+  fieldsInEvery = (fieldsInEvery == null)
+          ? currentFields
+          : intersect(fieldsInEvery, currentFields);
+  ```
+
+  After scanning all samples, `fieldsInEvery` contains only the fields present in every single record. Any field seen in at least one sample but not in `fieldsInEvery` is marked `optional = true` and gets a nullable Avro type. This prevents schema validation failures when a field is absent from some records.
+</Accordion>
+
+### RecordMapper — JsonNode → GenericRecord
+
+`RecordMapper.map(JsonNode node, Schema schema)` walks the inferred schema's field list and pulls the corresponding value from the `JsonNode`. It delegates to an internal `convert()` method that handles each Avro type:
+
+```java
+package com.example.kafka.services;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class RecordMapper {
+
+    public GenericRecord map(JsonNode node, Schema schema) {
+        GenericRecord record = new GenericData.Record(schema);
+
+        for (Schema.Field field : schema.getFields()) {
+            String name = field.name();
+            JsonNode value = (node != null) ? node.get(name) : null;
+
+            if (value == null || value.isNull()) {
+                System.out.println("MISSING/NULL FIELD: '" + name + "'"
+                        + (node != null && node.has("id") ? " in record id=" + node.get("id") : ""));
+                record.put(name, null);
+                continue;
+            }
+
+            record.put(name, convert(value, field.schema()));
+        }
+        return record;
+    }
+
+    private Object convert(JsonNode value, Schema fieldSchema) {
+        if (value == null || value.isNull()) return null;
+
+        switch (fieldSchema.getType()) {
+            case RECORD:  return map(value, fieldSchema);
+            case ARRAY:
+                List<Object> items = new ArrayList<>();
+                Schema itemSchema = fieldSchema.getElementType();
+                for (JsonNode item : value) {
+                    items.add(itemSchema.getType() == Schema.Type.RECORD
+                            ? map(item, itemSchema)
+                            : item.asText());
+                }
+                return items;
+            case LONG:    return value.asLong();
+            case DOUBLE:  return value.asDouble();
+            case BOOLEAN: return value.asBoolean();
+            case UNION:
+                for (Schema unionType : fieldSchema.getTypes()) {
+                    if (unionType.getType() != Schema.Type.NULL) {
+                        return convert(value, unionType);
+                    }
+                }
+                return null;
+            case STRING:
+            default:      return value.asText();
+        }
+    }
+}
+```
+
+Missing or null fields log a diagnostic warning and set `null` in the `GenericRecord` — the nullable union types inferred by `AvroSchemaService` ensure these records are still schema-valid.
+
+## Fat JAR Entry Point
+
+`DynamicProductProducer` is configured as the `Main-Class` of the executable fat JAR produced by the Maven Shade plugin. This means running the Docker image (or the JAR directly) with no arguments automatically launches this producer.
+
+```xml
+<!-- In pom.xml — maven-shade-plugin configuration -->
+<mainClass>com.example.kafka.producer.DynamicProductProducer</mainClass>
+```
+
+Running the fat JAR:
+```bash
+java -jar target/kafka-learning-1.0-SNAPSHOT.jar
+```
+
+## Running Locally with Maven
+
+```bash
+mvn exec:java -Dexec.mainClass=com.example.kafka.producer.DynamicProductProducer
+```
+
+Expected console output:
+```
+1. Fetching products from API...
+2. Building sample set for schema inference...
+3. Inferring schema from 30 sample records...
+{
+  "type" : "record",
+  "name" : "Product",
+  "namespace" : "com.example.kafka.avro",
+  "fields" : [ ... ]
+}
+4. Producing records to topic 'products'...
+Sent id=1 -> partition=0 offset=0
+Sent id=2 -> partition=0 offset=1
+...
+5. Done.
+```
+
+<Tip>
+  Because the producer uses async callbacks with `producer.flush()` at the end, all records are sent concurrently in the background. `flush()` ensures the JVM does not exit before the broker acknowledges every record — combining the throughput of async sends with the delivery guarantee of synchronous sends.
+</Tip>
+
+<Warning>
+  The `products` topic must exist in your Kafka cluster before running this producer. Create it with the appropriate partition count for your expected throughput. A replication factor of at least 3 is recommended for Confluent Cloud topics used in production.
+</Warning>
+
+## Required `.env` Variables
+
+```properties
+# Confluent Cloud Kafka broker
+KAFKA_BOOTSTRAP_SERVERS=pkc-xxxxx.region.provider.confluent.cloud:9092
+KAFKA_API_KEY=your_kafka_api_key
+KAFKA_API_SECRET=your_kafka_api_secret
+
+# Confluent Schema Registry
+SCHEMA_REGISTRY_URL=https://psrc-xxxxx.region.provider.confluent.cloud
+SCHEMA_REGISTRY_API_KEY=your_schema_registry_api_key
+SCHEMA_REGISTRY_API_SECRET=your_schema_registry_api_secret
+```

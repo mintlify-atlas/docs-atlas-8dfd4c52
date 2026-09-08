@@ -1,0 +1,370 @@
+---
+title: "Infer Avro schemas dynamically from JSON API responses"
+sidebarTitle: "Dynamic Inference"
+description: "AvroSchemaService infers an Avro Schema at runtime by inspecting sample JsonNode objects, handling optional fields, nested records, arrays, and all primitive types."
+---
+
+Most Avro workflows start with a hand-authored `.avsc` file. The dynamic inference pipeline in this project takes the opposite approach: it fetches live product data from a public REST API, examines the shape of the JSON at runtime, and constructs an `org.apache.avro.Schema` object without a single hard-coded field name. This lets `DynamicProductProducer` publish any JSON structure as a valid Avro message — and automatically treat fields that are missing from some records as nullable unions rather than schema violations.
+
+## Pipeline Overview
+
+<Steps>
+  <Step title="Fetch — ApiFetchService.fetchProducts()">
+    `ApiFetchService` makes an HTTP GET request to `https://dummyjson.com/products` using Java's built-in `HttpClient`. It parses the response body with Jackson's `ObjectMapper` and returns the `products` JSON array node directly — no POJO is built at this stage.
+
+    ```java
+    JsonNode products = ApiFetchService.fetchProducts();
+    // products is an ArrayNode; each element is an ObjectNode
+    ```
+  </Step>
+
+  <Step title="Sample — collect JsonNode list">
+    The producer iterates over the returned `ArrayNode` and collects each product `JsonNode` into a `List<JsonNode>`. This list is the input to `AvroSchemaService`.
+
+    ```java
+    List<JsonNode> samples = new ArrayList<>();
+    for (JsonNode product : products) {
+        samples.add(product);
+    }
+    ```
+  </Step>
+
+  <Step title="Infer — AvroSchemaService.inferSchemaFromSamples()">
+    `AvroSchemaService` scans every sample to build two data structures: a map of field names to a representative `JsonNode` value, and the intersection of field names present across **all** samples. Fields in the intersection are required; fields absent from even one sample become nullable `["null", type]` unions.
+
+    ```java
+    AvroSchemaService schemaService = new AvroSchemaService();
+    Schema schema = schemaService.inferSchemaFromSamples(
+            samples, "Product", "com.example.kafka.events");
+    ```
+  </Step>
+
+  <Step title="Map — RecordMapper.map()">
+    For each product `JsonNode`, `RecordMapper` walks the inferred schema's field list and converts every JSON value to the matching Avro Java type (`Long`, `Double`, `Boolean`, nested `GenericRecord`, `List`, or `String`). Missing or `null` fields in the source JSON are set to `null` in the record with a console warning.
+
+    ```java
+    RecordMapper mapper = new RecordMapper();
+    GenericRecord record = mapper.map(productNode, schema);
+    ```
+  </Step>
+
+  <Step title="Produce — send to Kafka">
+    The assembled `GenericRecord` is wrapped in a `ProducerRecord` and sent via `KafkaAvroSerializer`, which registers the inferred schema in Confluent Schema Registry and encodes the record in Avro binary format.
+
+    ```java
+    ProducerRecord<String, GenericRecord> kafkaRecord =
+            new ProducerRecord<>("products-avro", String.valueOf(id), record);
+    producer.send(kafkaRecord);
+    ```
+  </Step>
+</Steps>
+
+---
+
+## `ApiFetchService`
+
+`ApiFetchService` is a thin HTTP utility. It uses a static `HttpClient` and `ObjectMapper` (both safe to share across calls) and returns the raw `JsonNode` array to keep the caller in control of sampling logic.
+
+```java
+package com.example.kafka.services;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class ApiFetchService {
+    private final static HttpClient client = HttpClient.newHttpClient();
+    private final static ObjectMapper mapper = new ObjectMapper();
+
+    public static JsonNode fetchProducts() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://dummyjson.com/products"))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode root = mapper.readTree(response.body());
+        return root.get("products"); // this is the JSON array node — no POJO built
+    }
+}
+```
+
+<Info>
+`fetchProducts()` returns `root.get("products")` — an `ArrayNode` whose elements are `ObjectNode` instances, one per product. Jackson never maps the data to a POJO. This preserves complete flexibility: `AvroSchemaService` can handle whatever fields `dummyjson.com` returns, even if the API adds or removes fields in the future.
+</Info>
+
+---
+
+## `AvroSchemaService`
+
+`AvroSchemaService.inferSchemaFromSamples` is the core of the inference engine. It takes a list of `JsonNode` samples along with a `name` and `namespace` for the resulting Avro record, and returns a fully-constructed `org.apache.avro.Schema`.
+
+```java
+package com.example.kafka.services;
+
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.avro.Schema;
+import org.apache.avro.SchemaBuilder;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+public class AvroSchemaService {
+
+    public Schema inferSchemaFromSamples(List<JsonNode> samples, String name, String namespace) {
+
+        // field name -> one example JsonNode value (first non-null one we see)
+        Map<String, JsonNode> fieldExamples = new LinkedHashMap<>();
+        Set<String> fieldsInEvery = null;
+
+        for (JsonNode sample : samples) {
+            Set<String> currentFields = new HashSet<>();
+
+            Iterator<Map.Entry<String, JsonNode>> it = sample.fields();
+            while (it.hasNext()) {
+                Map.Entry<String, JsonNode> entry = it.next();
+                currentFields.add(entry.getKey());
+                fieldExamples.putIfAbsent(entry.getKey(), entry.getValue());
+            }
+
+            fieldsInEvery = (fieldsInEvery == null)
+                    ? currentFields
+                    : intersect(fieldsInEvery, currentFields);
+        }
+
+        SchemaBuilder.FieldAssembler<Schema> fields =
+                SchemaBuilder.record(name).namespace(namespace).fields();
+
+        for (Map.Entry<String, JsonNode> entry : fieldExamples.entrySet()) {
+            String key = entry.getKey();
+            JsonNode value = entry.getValue();
+            boolean optional = fieldsInEvery == null || !fieldsInEvery.contains(key);
+            addField(fields, key, value, optional, namespace);
+        }
+
+        return fields.endRecord();
+    }
+
+    private void addField(SchemaBuilder.FieldAssembler<Schema> fields, String key, JsonNode value,
+                           boolean optional, String namespace) {
+
+        switch (value.getNodeType()) {
+
+            case STRING -> {
+                if (optional) fields.name(key).type().nullable().stringType().noDefault();
+                else fields.name(key).type().stringType().noDefault();
+            }
+
+            case NUMBER -> {
+                boolean isLong = value.isIntegralNumber();
+                if (optional) {
+                    if (isLong) fields.name(key).type().nullable().longType().noDefault();
+                    else fields.name(key).type().nullable().doubleType().noDefault();
+                } else {
+                    if (isLong) fields.name(key).type().longType().noDefault();
+                    else fields.name(key).type().doubleType().noDefault();
+                }
+            }
+
+            case BOOLEAN -> {
+                if (optional) fields.name(key).type().nullable().booleanType().noDefault();
+                else fields.name(key).type().booleanType().noDefault();
+            }
+
+            case NULL -> fields.name(key).type().nullable().stringType().noDefault();
+
+            case OBJECT -> {
+                Schema nested = inferSchemaFromSamples(
+                        Collections.singletonList(value), capitalize(key) + "Record", namespace);
+                if (optional) fields.name(key).type().unionOf().nullType().and().type(nested).endUnion().nullDefault();
+                else fields.name(key).type(nested).noDefault();
+            }
+
+            case ARRAY -> {
+                if (value.isEmpty()) {
+                    fields.name(key).type().array().items().stringType().noDefault();
+                } else if (value.get(0).isObject()) {
+                    Schema itemSchema = inferSchemaFromSamples(
+                            Collections.singletonList(value.get(0)), capitalize(key) + "Item", namespace);
+                    fields.name(key).type().array().items(itemSchema).noDefault();
+                } else {
+                    fields.name(key).type().array().items().stringType().noDefault();
+                }
+            }
+
+            default -> fields.name(key).type().nullable().stringType().noDefault();
+        }
+    }
+
+    private Set<String> intersect(Set<String> a, Set<String> b) {
+        Set<String> result = new HashSet<>(a);
+        result.retainAll(b);
+        return result;
+    }
+
+    private String capitalize(String s) {
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+}
+```
+
+### Type Inference Rules
+
+The `addField` private method dispatches on Jackson's `JsonNodeType` enum. The table below maps each JSON node type to the Avro type emitted.
+
+| Jackson `NodeType` | Required field | Optional field | Notes |
+|---|---|---|---|
+| `STRING` | `string` | `["null","string"]` | Direct string mapping |
+| `NUMBER` (integral) | `long` | `["null","long"]` | `isIntegralNumber()` returns `true` |
+| `NUMBER` (floating) | `double` | `["null","double"]` | `isIntegralNumber()` returns `false` |
+| `BOOLEAN` | `boolean` | `["null","boolean"]` | Direct boolean mapping |
+| `NULL` | `["null","string"]` | `["null","string"]` | Always nullable; type defaults to string |
+| `OBJECT` | nested `RECORD` | `["null", RECORD]` | Recursive call with `capitalize(key)+"Record"` as name |
+| `ARRAY` (empty) | `array<string>` | `array<string>` | Falls back to string items |
+| `ARRAY` (objects) | `array<RECORD>` | `array<RECORD>` | Recursive call using first element |
+| `ARRAY` (primitives) | `array<string>` | `array<string>` | All primitive arrays use string items |
+| default | `["null","string"]` | `["null","string"]` | Catch-all for unknown node types |
+
+<Accordion title="How optional field detection works">
+  `inferSchemaFromSamples` maintains a `Set<String> fieldsInEvery` that starts as `null` and is narrowed on every iteration:
+
+  ```java
+  fieldsInEvery = (fieldsInEvery == null)
+          ? currentFields
+          : intersect(fieldsInEvery, currentFields);
+  ```
+
+  After processing all samples, `fieldsInEvery` contains only the field names present in **every** sample. Any field in `fieldExamples` but not in `fieldsInEvery` is marked `optional = true`, causing `addField` to emit a nullable union type instead of a bare scalar.
+
+  If the input list contains only one sample, every field in that sample is treated as required (because `fieldsInEvery` equals the single sample's field set with no intersection reducing it).
+</Accordion>
+
+<Accordion title="Nested OBJECT and ARRAY handling">
+  When a JSON field's value is an `OBJECT`, `addField` calls `inferSchemaFromSamples` recursively, passing `Collections.singletonList(value)` as the sample and appending `"Record"` to the capitalized key as the nested record name. For example, a field `"dimensions"` containing a JSON object produces a nested Avro record named `DimensionsRecord`.
+
+  For `ARRAY` fields, `addField` inspects the first element:
+  - If the array is empty, it defaults to `array<string>`.
+  - If the first element is an `ObjectNode`, it recurses to produce `array<CapitalizedKeyItem>`.
+  - Otherwise it defaults to `array<string>`.
+
+  Only the first element of an array is inspected. For heterogeneous arrays, all elements are effectively treated as strings.
+</Accordion>
+
+---
+
+## `RecordMapper`
+
+Once a schema is inferred, `RecordMapper.map()` converts a live `JsonNode` into a `GenericRecord` that Avro's serializer can encode. It walks the schema's field list — rather than the JSON's keys — to ensure every declared field is written, even if the source JSON is missing it.
+
+```java
+package com.example.kafka.services;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.avro.Schema;
+import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericRecord;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class RecordMapper {
+
+    public GenericRecord map(JsonNode node, Schema schema) {
+        GenericRecord record = new GenericData.Record(schema);
+
+        for (Schema.Field field : schema.getFields()) {
+            String name = field.name();
+            JsonNode value = (node != null) ? node.get(name) : null;
+
+            if (value == null || value.isNull()) {
+                System.out.println("MISSING/NULL FIELD: '" + name + "'"
+                        + (node != null && node.has("id") ? " in record id=" + node.get("id") : ""));
+                record.put(name, null);
+                continue;
+            }
+
+            record.put(name, convert(value, field.schema()));
+        }
+        return record;
+    }
+
+    private Object convert(JsonNode value, Schema fieldSchema) {
+        if (value == null || value.isNull()) return null;
+
+        switch (fieldSchema.getType()) {
+
+            case RECORD:
+                return map(value, fieldSchema);
+
+            case ARRAY:
+                List<Object> items = new ArrayList<>();
+                Schema itemSchema = fieldSchema.getElementType();
+                for (JsonNode item : value) {
+                    items.add(itemSchema.getType() == Schema.Type.RECORD
+                            ? map(item, itemSchema)
+                            : item.asText());
+                }
+                return items;
+
+            case LONG:
+                return value.asLong();
+
+            case DOUBLE:
+                return value.asDouble();
+
+            case BOOLEAN:
+                return value.asBoolean();
+
+            case UNION:
+                // nullable field -> union is [null, actualType] or [null, actualType1, actualType2...]
+                for (Schema unionType : fieldSchema.getTypes()) {
+                    if (unionType.getType() != Schema.Type.NULL) {
+                        return convert(value, unionType);
+                    }
+                }
+                return null;
+
+            case STRING:
+            default:
+                return value.asText();
+        }
+    }
+}
+```
+
+### Conversion Logic
+
+<CardGroup cols={2}>
+  <Card title="RECORD" icon="layer-group">
+    Calls `map()` recursively, passing the nested `JsonNode` object and the nested schema. Handles arbitrarily deep nesting.
+  </Card>
+  <Card title="ARRAY" icon="list">
+    Iterates the JSON array. Nested objects become `GenericRecord` instances via recursion; primitives become strings via `asText()`.
+  </Card>
+  <Card title="UNION" icon="code-branch">
+    Iterates the union's type list and delegates to `convert()` with the **first non-null** type found. Correctly handles `["null","string"]`, `["null","long"]`, etc.
+  </Card>
+  <Card title="LONG / DOUBLE / BOOLEAN" icon="hashtag">
+    Calls `asLong()`, `asDouble()`, or `asBoolean()` respectively. Jackson coerces compatible JSON number strings automatically.
+  </Card>
+  <Card title="STRING (default)" icon="text">
+    Calls `value.asText()`, which works for any JSON scalar — numbers, booleans, and strings all produce a string representation.
+  </Card>
+  <Card title="Missing / null fields" icon="triangle-exclamation">
+    Writes `null` to the `GenericRecord` and prints `MISSING/NULL FIELD: 'fieldName' in record id=X` to standard output for observability.
+  </Card>
+</CardGroup>
+
+<Warning>
+`RecordMapper` sets missing fields to `null` without throwing. This is safe only because `AvroSchemaService` already generated nullable union types for optional fields. If you pass a `GenericRecord` with a `null` value for a non-nullable field to `KafkaAvroSerializer`, Avro will throw an `AvroRuntimeException`. Always infer the schema from the same set of samples you intend to map.
+</Warning>

@@ -1,0 +1,187 @@
+---
+title: "Kafka Learning: Java patterns for Apache Kafka"
+sidebarTitle: "Introduction"
+description: "Overview of the Kafka Learning project — a Java reference covering producers, consumers, Avro, JSON Schema, Schema Registry, and topic management."
+---
+
+Kafka Learning is a hands-on Java reference project that walks through the most important patterns you'll encounter when building real-world Apache Kafka applications. Rather than a single monolithic example, the codebase is organized into focused, self-contained classes — each one demonstrating a specific concept such as producing plain-string events, consuming with a group, registering schemas, or managing topic lifecycle — so you can study each piece independently and drop it into your own projects with confidence.
+
+## Who is this for?
+
+This project is aimed at Java developers who already understand basic Kafka concepts (topics, partitions, producers, consumers) and want to see idiomatic, production-flavored code rather than toy snippets. Every class compiles and runs against a real broker — either a local Docker deployment or a Confluent Cloud cluster — using the exact client libraries and serialization formats you would choose in production.
+
+## Project structure
+
+The source tree under `src/main/java/com/example/kafka/` is split into seven packages, each with a single responsibility:
+
+```
+src/main/java/com/example/kafka/
+├── connections/          # Broker + Schema Registry connection factories
+│   ├── KafkaConnection.java          # Confluent Cloud (SASL_SSL / PLAIN)
+│   ├── KafkaLocalConnection.java     # Local broker (plaintext, localhost:9092)
+│   └── RegistryConnection.java       # Schema Registry credentials
+│
+├── producer/             # Five producer variants
+│   ├── Producer.java                 # Plain-string producer → orders topic
+│   ├── LocalProducer.java            # Plain-string producer → local payments topic
+│   ├── SchemaProducer.java           # JSON Schema producer → orders topic
+│   ├── AvroProducer.java             # Avro producer (generated class) → payments-avro
+│   └── DynamicProductProducer.java   # Avro producer (inferred schema, API data) → products
+│
+├── consumer/             # Two consumer variants
+│   ├── Consumer.java                 # Plain-string consumer ← orders topic
+│   └── SchemaConsumer.java           # JSON Schema consumer ← orders topic
+│
+├── admin/                # Topic lifecycle utilities
+│   ├── KafkaConnectionTest.java      # Verifies broker connectivity
+│   ├── KafkaTopicCreator.java        # Creates topics programmatically
+│   └── KafkaTopicDeleter.java        # Deletes topics programmatically
+│
+├── services/             # Supporting services
+│   ├── ApiFetchService.java          # Fetches product JSON from dummyjson.com
+│   ├── AvroSchemaService.java        # Infers an Avro Schema from JSON samples
+│   └── RecordMapper.java             # Maps Jackson JsonNode → Avro GenericRecord
+│
+├── events/               # Plain Java event model
+│   └── PaymentEvent.java             # POJO used by JSON Schema producer/consumer
+│
+└── AvroConvertor/        # Avro conversion utilities (SchemaMapper placeholder)
+```
+
+The Avro schema definition lives at `src/main/avro/PaymentAvro.avsc`. The `avro-maven-plugin` generates `PaymentAvro.java` under `target/generated-sources/avro` during the `generate-sources` phase, so it is available to `AvroProducer` without any manual code.
+
+## Topics used
+
+| Topic | Serialization | Producer class | Consumer class |
+|---|---|---|---|
+| `orders` | String (raw JSON) | `Producer` | `Consumer` |
+| `orders` | JSON Schema | `SchemaProducer` | `SchemaConsumer` |
+| `payments` | String | `LocalProducer` | — |
+| `payments-avro` | Avro (generated class) | `AvroProducer` | — |
+| `products` | Avro (inferred schema) | `DynamicProductProducer` | — |
+
+## Key dependencies
+
+<AccordionGroup>
+  <Accordion title="kafka-clients 4.3.0 — Apache Kafka Java client">
+    The core Apache Kafka library. Provides `KafkaProducer`, `KafkaConsumer`, `Admin`, `ProducerRecord`, `ConsumerRecords`, and all the `*Config` constants referenced throughout the project. This is the only dependency needed for plain-string messaging; all other libraries layer on top of it.
+
+    ```xml
+    <dependency>
+        <groupId>org.apache.kafka</groupId>
+        <artifactId>kafka-clients</artifactId>
+        <version>4.3.0</version>
+    </dependency>
+    ```
+  </Accordion>
+
+  <Accordion title="kafka-avro-serializer 8.3.1 — Confluent Avro serialization">
+    Provides `KafkaAvroSerializer` and `KafkaAvroDeserializer`, which integrate with Confluent Schema Registry. When a message is produced, the serializer registers or looks up the Avro schema automatically and prepends the schema ID to the wire payload, enabling consumers to deserialize without carrying the full schema themselves.
+
+    ```xml
+    <dependency>
+        <groupId>io.confluent</groupId>
+        <artifactId>kafka-avro-serializer</artifactId>
+        <version>8.3.1</version>
+    </dependency>
+    ```
+  </Accordion>
+
+  <Accordion title="kafka-json-schema-serializer 8.3.1 — Confluent JSON Schema serialization">
+    Provides `KafkaJsonSchemaSerializer` and `KafkaJsonSchemaDeserializer`. Works identically to the Avro variant but uses JSON Schema instead of Avro IDL — a good fit when your team is already comfortable with JSON and wants schema governance without the Avro binary format.
+
+    ```xml
+    <dependency>
+        <groupId>io.confluent</groupId>
+        <artifactId>kafka-json-schema-serializer</artifactId>
+        <version>8.3.1</version>
+    </dependency>
+    ```
+  </Accordion>
+
+  <Accordion title="avro 1.12.1 — Apache Avro runtime">
+    Provides the `Schema`, `GenericRecord`, `GenericData`, and `SchemaBuilder` classes used extensively in `AvroSchemaService`, `RecordMapper`, and `DynamicProductProducer`. Also powers the `avro-maven-plugin`, which generates the type-safe `PaymentAvro` class at compile time from `PaymentAvro.avsc`.
+
+    ```xml
+    <dependency>
+        <groupId>org.apache.avro</groupId>
+        <artifactId>avro</artifactId>
+        <version>1.12.1</version>
+    </dependency>
+    ```
+  </Accordion>
+
+  <Accordion title="jackson-databind 2.17.2 — JSON parsing">
+    Used by `ApiFetchService` to parse the HTTP response from the products API into a `JsonNode` tree, and by `RecordMapper` to traverse that tree field by field when converting JSON to Avro `GenericRecord`. Jackson is also the serialization backbone of the Confluent JSON Schema serializer.
+
+    ```xml
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>2.17.2</version>
+    </dependency>
+    ```
+  </Accordion>
+
+  <Accordion title="dotenv-java 3.0.2 — Environment variable loading">
+    Reads a `.env` file from the working directory and makes its values available through `Dotenv.load().get("KEY")`. This keeps credentials out of source code and works identically whether you run with `mvn exec:java` locally or inject variables via Docker environment flags.
+
+    ```xml
+    <dependency>
+        <groupId>io.github.cdimascio</groupId>
+        <artifactId>dotenv-java</artifactId>
+        <version>3.0.2</version>
+    </dependency>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Build system highlights
+
+The project uses three Maven plugins beyond the standard compiler:
+
+- **`maven-shade-plugin`** — bundles all dependencies into a single fat JAR (`target/kafka-learning-1.0-SNAPSHOT.jar`) with `DynamicProductProducer` as the `Main-Class`. This fat JAR is what the Docker image runs.
+- **`avro-maven-plugin`** — generates `PaymentAvro.java` from `src/main/avro/PaymentAvro.avsc` during the `generate-sources` phase.
+- **`exec-maven-plugin`** — allows running any class directly with `mvn exec:java -Dexec.mainClass=<class>` without a separate runner script.
+
+## Prerequisites
+
+Before running any class you need:
+
+<CardGroup cols={2}>
+  <Card title="Java 17+" icon="java">
+    The project targets Java 17 (`maven.compiler.release=17`). Verify with `java -version`. Any JDK distribution (Temurin, Corretto, GraalVM) works.
+  </Card>
+  <Card title="Maven 3.9+" icon="box">
+    Used to build, run, and manage dependencies. Verify with `mvn -v`. The multi-stage Dockerfile uses `maven:3.9-eclipse-temurin-17` as the build image.
+  </Card>
+  <Card title="Confluent Cloud account" icon="cloud">
+    Required for all classes that use `KafkaConnection` or `RegistryConnection`. You need a cluster API key/secret and (for Schema Registry) a Schema Registry API key/secret.
+  </Card>
+  <Card title="Local Kafka broker (alternative)" icon="server">
+    `KafkaLocalConnection` targets `localhost:9092` with no authentication — ideal for offline development. Spin one up with the official `apache/kafka` Docker image.
+  </Card>
+</CardGroup>
+
+## Sections in this documentation
+
+<CardGroup cols={2}>
+  <Card title="Connections" icon="plug" href="/connections">
+    How `KafkaConnection`, `KafkaLocalConnection`, and `RegistryConnection` load credentials and build `Properties` objects for each client type.
+  </Card>
+  <Card title="Producers" icon="paper-plane" href="/producers">
+    Five producer patterns: plain string, local, JSON Schema, Avro with generated classes, and Avro with dynamically inferred schemas.
+  </Card>
+  <Card title="Consumers" icon="inbox" href="/consumers">
+    Plain-string and JSON Schema consumer implementations with group management, offset reset strategy, and continuous poll loops.
+  </Card>
+  <Card title="Admin" icon="sliders" href="/admin">
+    Programmatic topic creation and deletion using the `Admin` client, plus a connection-test utility.
+  </Card>
+  <Card title="Schema & Serialization" icon="code" href="/schema/avro-schema">
+    Avro IDL with code generation, JSON Schema serialization, schema inference from live JSON data, and the `PaymentEvent` POJO model.
+  </Card>
+  <Card title="Deployment" icon="docker" href="/deployment">
+    Multi-stage Dockerfile that produces a minimal Alpine JRE image running the `DynamicProductProducer` fat JAR.
+  </Card>
+</CardGroup>

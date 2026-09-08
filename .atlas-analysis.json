@@ -1,0 +1,103 @@
+{
+  "projectType": "general",
+  "projectName": "Kafka Learning",
+  "projectDescription": "A Java-based hands-on reference project demonstrating Apache Kafka fundamentals — producers, consumers, topic management, Avro serialization, JSON Schema, Schema Registry integration, and dynamic schema inference — targeting Confluent Cloud and local Kafka clusters.",
+  "theme": "aspen",
+  "primaryColor": "#1D3557",
+  "lightColor": "#457B9D",
+  "darkColor": "#0A1628",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guide",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Connections",
+            "pages": [
+              "connections/confluent-cloud",
+              "connections/local-kafka",
+              "connections/schema-registry"
+            ]
+          },
+          {
+            "group": "Producers",
+            "pages": [
+              "producers/string-producer",
+              "producers/schema-producer",
+              "producers/avro-producer",
+              "producers/dynamic-producer"
+            ]
+          },
+          {
+            "group": "Consumers",
+            "pages": [
+              "consumers/string-consumer",
+              "consumers/schema-consumer"
+            ]
+          },
+          {
+            "group": "Topic Administration",
+            "pages": [
+              "admin/connection-test",
+              "admin/topic-management"
+            ]
+          },
+          {
+            "group": "Schema & Serialization",
+            "pages": [
+              "schema/avro-schema",
+              "schema/json-schema",
+              "schema/dynamic-inference"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/configuration"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "String and raw JSON message production to Confluent Cloud topics",
+    "Avro serialization with auto-generated POJO from .avsc schemas",
+    "JSON Schema serialization using Confluent KafkaJsonSchemaSerializer",
+    "Dynamic Avro schema inference from live API data (dummyjson.com/products)",
+    "Confluent Schema Registry integration for schema evolution",
+    "Kafka Admin API for programmatic topic creation and deletion",
+    "Local Kafka support via KafkaLocalConnection (no auth)",
+    "Confluent Cloud SASL_SSL/PLAIN authentication via dotenv",
+    "Multi-stage Docker build producing a lean JRE Alpine runtime image",
+    "Consumer group management with configurable offset reset policy"
+  ],
+  "publicApiSurface": [
+    "KafkaConnection.getProperties()",
+    "KafkaLocalConnection.getProperties()",
+    "RegistryConnection.getProperties()",
+    "Producer.main(String[])",
+    "LocalProducer.main(String[])",
+    "AvroProducer.main(String[])",
+    "SchemaProducer.main(String[])",
+    "DynamicProductProducer.main(String[])",
+    "Consumer.main(String[])",
+    "SchemaConsumer.main(String[])",
+    "KafkaConnectionTest.main(String[])",
+    "KafkaTopicCreator.main(String[])",
+    "KafkaTopicDeleter.main(String[])",
+    "AvroSchemaService.inferSchemaFromSamples(List<JsonNode>, String, String)",
+    "RecordMapper.map(JsonNode, Schema)",
+    "ApiFetchService.fetchProducts()",
+    "PaymentEvent(String, long, String, String)",
+    "PaymentAvro (Avro-generated record: customerId, amount, currency, eventType)"
+  ]
+}

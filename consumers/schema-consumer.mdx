@@ -1,0 +1,295 @@
+---
+title: "Consume JSON Schema–validated events from Kafka"
+sidebarTitle: "Schema Consumer"
+description: "SchemaConsumer uses KafkaJsonSchemaDeserializer and Confluent Schema Registry to deserialize messages from the orders topic back into typed PaymentEvent objects."
+---
+
+The `SchemaConsumer` class takes consumer deserialization a step further than the raw string approach: instead of treating message values as opaque strings, it uses Confluent's `KafkaJsonSchemaDeserializer` to validate each record's payload against the registered JSON Schema and reconstruct a fully typed `PaymentEvent` Java object. The schema itself is never embedded in the consumer — it is fetched automatically from Confluent Schema Registry at startup using the same environment-driven credentials that the producer used when registering it. This guarantees that producer and consumer always agree on the event shape without any out-of-band coordination.
+
+## Complete Source
+
+<CodeGroup>
+```java SchemaConsumer.java
+package com.example.kafka.consumer;
+import java.util.Collections;
+import java.util.Properties;
+
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import com.example.kafka.connections.KafkaConnection;
+import com.example.kafka.connections.RegistryConnection;
+import com.example.kafka.events.PaymentEvent;
+
+import io.confluent.kafka.serializers.json.KafkaJsonSchemaDeserializer;
+
+public class SchemaConsumer {
+
+    public static void main(String[] args) {
+        Properties props = KafkaConnection.getProperties();
+
+        props.put("group.id", "schema-consumer-group");
+        props.put("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put("value.deserializer", KafkaJsonSchemaDeserializer.class.getName());
+
+        Properties registryProps = RegistryConnection.getProperties();
+
+        props.putAll(registryProps);
+
+        try (KafkaConsumer<String, PaymentEvent> consumer = new KafkaConsumer<>(props)) {
+            consumer.subscribe(Collections.singletonList("orders"));
+
+            while (true) {
+                var records = consumer.poll(java.time.Duration.ofMillis(100));
+                for (var record : records) {
+                    System.out.printf("Consumed record with key %s ", record.key());
+                    System.out.printf("Consumed record with value %s%n", record.value().toString());
+                }
+            }
+        }
+    }
+}
+```
+
+```java PaymentEvent.java
+package com.example.kafka.events;
+
+public class PaymentEvent {
+
+    private String customerId;
+    private long amount;
+    private String currency;
+    private String eventType;
+
+    public PaymentEvent(String customerId,
+                        long amount,
+                        String currency,
+                        String eventType) {
+        this.customerId = customerId;
+        this.amount = amount;
+        this.currency = currency;
+        this.eventType = eventType;
+    }
+
+    public String getCustomerId() {
+        return customerId;
+    }
+
+    public long getAmount() {
+        return amount;
+    }
+
+    public String getCurrency() {
+        return currency;
+    }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    @Override
+    public String toString() {
+        return "PaymentEvent{" +
+                "customerId='" + customerId + '\'' +
+                ", amount=" + amount +
+                ", currency='" + currency + '\'' +
+                ", eventType='" + eventType + '\'' +
+                '}';
+    }
+}
+```
+</CodeGroup>
+
+## Configuration Properties
+
+`SchemaConsumer` assembles its `Properties` object from three separate sources, merged in order:
+
+<Steps>
+  <Step title="KafkaConnection.getProperties()">
+    Provides the broker `bootstrap.servers` address and the SASL/SSL authentication block (`security.protocol`, `sasl.mechanism`, `sasl.jaas.config`) loaded from `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_API_KEY`, and `KAFKA_API_SECRET` in the `.env` file.
+  </Step>
+  <Step title="Consumer-specific properties">
+    Three properties are added directly to the `props` object:
+
+    ```java
+    props.put("group.id", "schema-consumer-group");
+    props.put("key.deserializer",
+        "org.apache.kafka.common.serialization.StringDeserializer");
+    props.put("value.deserializer",
+        KafkaJsonSchemaDeserializer.class.getName());
+    ```
+  </Step>
+  <Step title="RegistryConnection.getProperties()">
+    Merged via `props.putAll(registryProps)`, this adds the three Schema Registry properties loaded from the `.env` file:
+
+    ```java
+    props.put("schema.registry.url", schemaRegistryUrl);
+    props.put("basic.auth.credentials.source", "USER_INFO");
+    props.put("basic.auth.user.info",
+        schemaRegistryApiKey + ":" + schemaRegistryApiSecret);
+    ```
+  </Step>
+</Steps>
+
+### Full Property Reference
+
+<Tabs>
+  <Tab title="Consumer">
+    <ParamField body="group.id" type="string" required>
+      Set to `"schema-consumer-group"`. This group is distinct from the `"payment-consumer-group"` used by the plain string consumer, so both groups maintain independent offset cursors on the same `orders` topic. They each see every message without interfering with each other.
+    </ParamField>
+
+    <ParamField body="key.deserializer" type="StringDeserializer" required>
+      Message keys are plain strings (e.g. `"order-001"`), so the standard `StringDeserializer` is sufficient.
+    </ParamField>
+
+    <ParamField body="value.deserializer" type="KafkaJsonSchemaDeserializer" required>
+      Confluent's JSON Schema deserializer. On each `poll()`, it reads the schema ID embedded in the first five bytes of the message payload, fetches the corresponding JSON Schema from Schema Registry, validates the JSON body against it, then uses Jackson to unmarshal the JSON into the target Java type (`PaymentEvent`).
+    </ParamField>
+  </Tab>
+
+  <Tab title="Schema Registry">
+    <ParamField body="schema.registry.url" type="string" required>
+      The HTTPS endpoint of your Confluent Schema Registry instance, loaded from `SCHEMA_REGISTRY_URL` in the `.env` file.
+    </ParamField>
+
+    <ParamField body="basic.auth.credentials.source" type="string" required>
+      Set to `"USER_INFO"` — instructs the deserializer to read credentials from the `basic.auth.user.info` property rather than from a separate credentials provider.
+    </ParamField>
+
+    <ParamField body="basic.auth.user.info" type="string" required>
+      The `SCHEMA_REGISTRY_API_KEY` and `SCHEMA_REGISTRY_API_SECRET` joined with a colon, used as the HTTP Basic Auth header when contacting Schema Registry.
+    </ParamField>
+  </Tab>
+
+  <Tab title="Broker Connection">
+    <ParamField body="bootstrap.servers" type="string" required>
+      Loaded from `KAFKA_BOOTSTRAP_SERVERS`. The Confluent Cloud (or local) broker endpoint.
+    </ParamField>
+
+    <ParamField body="security.protocol" type="string">
+      `SASL_SSL` — encrypted, authenticated transport.
+    </ParamField>
+
+    <ParamField body="sasl.mechanism" type="string">
+      `PLAIN` — API key/secret credentials transported over the TLS-protected SASL channel.
+    </ParamField>
+
+    <ParamField body="sasl.jaas.config" type="string">
+      Inline JAAS configuration that injects `KAFKA_API_KEY` and `KAFKA_API_SECRET` at runtime.
+    </ParamField>
+  </Tab>
+</Tabs>
+
+## How `KafkaJsonSchemaDeserializer` Works
+
+When `SchemaProducer` wrote each `PaymentEvent` to the `orders` topic, `KafkaJsonSchemaSerializer` prefixed the raw JSON bytes with a 5-byte **magic header**: one zero byte followed by a 4-byte big-endian integer that is the schema's numeric ID in Schema Registry.
+
+On the consumer side, `KafkaJsonSchemaDeserializer` reverses this process:
+
+<Steps>
+  <Step title="Read the magic byte">
+    Checks that the first byte is `0x00` (the Confluent wire format marker). Any other value causes a deserialization exception.
+  </Step>
+  <Step title="Extract the schema ID">
+    Reads the next 4 bytes as the schema ID integer and issues a `GET /schemas/ids/{id}` request to Schema Registry. The schema is cached in memory after the first lookup.
+  </Step>
+  <Step title="Validate the JSON body">
+    The remaining bytes are the UTF-8 JSON payload. The deserializer validates the JSON structure against the fetched JSON Schema, rejecting any record that does not conform.
+  </Step>
+  <Step title="Unmarshal to PaymentEvent">
+    Jackson `ObjectMapper` maps the validated JSON fields to a `PaymentEvent` instance using the POJO's getter/setter naming convention. The consumer receives a fully populated `PaymentEvent` object from `record.value()`.
+  </Step>
+</Steps>
+
+<Info>
+  The target type (`PaymentEvent`) does not need to be annotated with any Confluent-specific annotations. `KafkaJsonSchemaDeserializer` uses standard Jackson reflection — as long as the JSON field names match the POJO field names (`customerId`, `amount`, `currency`, `eventType`), deserialization succeeds.
+</Info>
+
+## The `PaymentEvent` POJO
+
+The `PaymentEvent` class is a simple value object with four fields. The `toString()` override is what gets printed when the consumer calls `record.value().toString()`:
+
+```java
+@Override
+public String toString() {
+    return "PaymentEvent{" +
+            "customerId='" + customerId + '\'' +
+            ", amount=" + amount +
+            ", currency='" + currency + '\'' +
+            ", eventType='" + eventType + '\'' +
+            '}';
+}
+```
+
+This means every line of consumer output is a human-readable summary of the deserialized event rather than a raw JSON string — the fields are accessed from the actual Java object, not parsed from text.
+
+## Expected Console Output
+
+```text
+Consumed record with key order-001 Consumed record with value PaymentEvent{customerId='cust-abc', amount=250, currency='USD', eventType='PAYMENT_INITIATED'}
+Consumed record with key order-002 Consumed record with value PaymentEvent{customerId='cust-xyz', amount=500, currency='EUR', eventType='PAYMENT_INITIATED'}
+```
+
+<Accordion title="Why are key and value printed on separate printf calls?">
+  The two `System.out.printf` calls use different format strings intentionally. The first call (`"Consumed record with key %s "`) ends with a trailing space but no newline, so the second call's output (`"Consumed record with value %s%n"`) appends directly on the same line. The `%n` in the second call adds the platform-appropriate line separator. This is a formatting choice in the source — both fields always appear together on one line per record.
+</Accordion>
+
+## String Consumer vs. Schema Consumer
+
+<CardGroup cols={2}>
+  <Card title="String Consumer" icon="text">
+    **Deserializer:** `StringDeserializer`
+
+    **Record type:** `KafkaConsumer<String, String>`
+
+    **Output:** Raw string value exactly as it was produced — no validation, no type safety. Any producer can write any string to the topic without constraint.
+  </Card>
+  <Card title="Schema Consumer" icon="shield-check">
+    **Deserializer:** `KafkaJsonSchemaDeserializer`
+
+    **Record type:** `KafkaConsumer<String, PaymentEvent>`
+
+    **Output:** A typed `PaymentEvent` Java object. The schema is validated on every message, and records that deviate from the registered schema are rejected before your application code sees them.
+  </Card>
+</CardGroup>
+
+The Schema Consumer approach is preferred in production because it acts as a contract enforcement layer: if a producer team accidentally changes the shape of a `PaymentEvent` in a breaking way, the Schema Registry compatibility check blocks the rogue schema from being registered, and consumers are protected by both the wire-format validation and Java's compile-time type system.
+
+## Running the Schema Consumer
+
+<Steps>
+  <Step title="Ensure the .env file contains all required variables">
+    ```properties
+    KAFKA_BOOTSTRAP_SERVERS=<your-broker-endpoint>
+    KAFKA_API_KEY=<your-api-key>
+    KAFKA_API_SECRET=<your-api-secret>
+    SCHEMA_REGISTRY_URL=<your-registry-url>
+    SCHEMA_REGISTRY_API_KEY=<your-registry-api-key>
+    SCHEMA_REGISTRY_API_SECRET=<your-registry-api-secret>
+    ```
+  </Step>
+
+  <Step title="Start the consumer">
+    ```bash
+    mvn exec:java -Dexec.mainClass=com.example.kafka.consumer.SchemaConsumer
+    ```
+
+    The consumer will block on `poll()` until records arrive. Because no `AUTO_OFFSET_RESET_CONFIG` is explicitly set, it defaults to `"latest"` — meaning it will only consume records produced **after** it starts unless the group has a previously committed offset.
+  </Step>
+</Steps>
+
+<Tip>
+  Run `SchemaProducer` first to populate the `orders` topic with typed `PaymentEvent` messages before starting `SchemaConsumer`. Because `SchemaConsumer` defaults to the `"latest"` offset reset policy, messages produced before the consumer first joined the group will not be replayed automatically. Start the consumer, then trigger the producer in a second terminal to see end-to-end typed deserialization in action.
+
+  ```bash
+  # Terminal 1
+  mvn exec:java -Dexec.mainClass=com.example.kafka.consumer.SchemaConsumer
+
+  # Terminal 2
+  mvn exec:java -Dexec.mainClass=com.example.kafka.producer.SchemaProducer
+  ```
+</Tip>
+
+<Warning>
+  `SchemaConsumer` will throw a `SerializationException` at runtime if it polls a record that was **not** produced by `KafkaJsonSchemaSerializer` — for example, a plain string message written by the basic `Producer`. The magic byte check will fail because the plain string payload does not carry the 5-byte Confluent wire format header. If you mix producers on the same topic, ensure all records use the same serialization format.
+</Warning>
